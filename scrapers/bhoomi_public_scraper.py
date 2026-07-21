@@ -222,9 +222,10 @@ class BhoomiPublicScraper:
                     # DO NOT change language after Go - let it stay in Kannada to avoid interrupting ASP.NET lifecycle
                     
                     # Take screenshot after GO
-                    os.makedirs("logs/debug", exist_ok=True)
-                    await page.screenshot(path='logs/debug/bhoomi_public_after_go.png')
-                    print("Screenshot saved: logs/debug/bhoomi_public_after_go.png")
+                    log_dir = "/Users/smrithis/Desktop/landrecords/logs/debug"
+                    os.makedirs(log_dir, exist_ok=True)
+                    await page.screenshot(path=f'{log_dir}/bhoomi_public_after_go.png')
+                    print(f"Screenshot saved: {log_dir}/bhoomi_public_after_go.png")
                     
                     # Wait for Surnoc dropdown to become enabled using locator
                     print("Waiting for Surnoc dropdown to enable...")
@@ -241,8 +242,8 @@ class BhoomiPublicScraper:
                         print(f"Surnoc not enabled after timeout: {e}")
                     
                     # Take screenshot to debug current state
-                    await page.screenshot(path='logs/debug/bhoomi_public_before_surnoc.png')
-                    print("Screenshot saved: logs/debug/bhoomi_public_before_surnoc.png")
+                    await page.screenshot(path=f'{log_dir}/bhoomi_public_before_surnoc.png')
+                    print(f"Screenshot saved: {log_dir}/bhoomi_public_before_surnoc.png")
                     
                     # Check if surnoc dropdown exists and its state using locator
                     print("Checking surnoc dropdown state...")
@@ -309,8 +310,8 @@ class BhoomiPublicScraper:
                         print("Fetch Details clicked")
                     
                     # Take screenshot after Fetch
-                    await page.screenshot(path='logs/debug/bhoomi_public_after_fetch.png')
-                    print("Screenshot saved: logs/debug/bhoomi_public_after_fetch.png")
+                    await page.screenshot(path=f'{log_dir}/bhoomi_public_after_fetch.png')
+                    print(f"Screenshot saved: {log_dir}/bhoomi_public_after_fetch.png")
                     
                     # Extract data from results table
                     page_content = await page.content()
@@ -408,14 +409,14 @@ class BhoomiPublicScraper:
                     print("RTC document loaded")
                     
                     # Take full-page screenshot
-                    await page.screenshot(path='logs/debug/full_rtc_document.png', full_page=True)
-                    print("Screenshot saved: logs/debug/full_rtc_document.png")
+                    await page.screenshot(path=f'{log_dir}/full_rtc_document.png', full_page=True)
+                    print(f"Screenshot saved: {log_dir}/full_rtc_document.png")
                     
                     # Save full RTC HTML
                     full_rtc_html = await page.content()
-                    with open("logs/debug/full_rtc_document.html", "w", encoding="utf-8") as f:
+                    with open(f"{log_dir}/full_rtc_document.html", "w", encoding="utf-8") as f:
                         f.write(full_rtc_html)
-                    print("HTML saved: logs/debug/full_rtc_document.html")
+                    print(f"HTML saved: {log_dir}/full_rtc_document.html")
                     
                     # Extract RTC image URL from HTML
                     soup = BeautifulSoup(full_rtc_html, 'html.parser')
@@ -433,7 +434,7 @@ class BhoomiPublicScraper:
                             response = requests.get(rtc_image_url)
                             if response.status_code == 200:
                                 image = Image.open(io.BytesIO(response.content))
-                                image_path = 'logs/debug/rtc_image.png'
+                                image_path = f'{log_dir}/rtc_image.png'
                                 image.save(image_path)
                                 print(f"RTC image saved: {image_path}")
                                 
@@ -444,21 +445,21 @@ class BhoomiPublicScraper:
                                     print(f"OCR extracted text length: {len(ocr_text)} characters")
                                     
                                     # Save OCR text
-                                    with open("logs/debug/rtc_ocr_text.txt", "w", encoding="utf-8") as f:
+                                    with open(f"{log_dir}/rtc_ocr_text.txt", "w", encoding="utf-8") as f:
                                         f.write(ocr_text)
-                                    print("OCR text saved: logs/debug/rtc_ocr_text.txt")
+                                    print(f"OCR text saved: {log_dir}/rtc_ocr_text.txt")
                                 except Exception as ocr_error:
                                     print(f"OCR failed: {ocr_error}")
                                     print("Using existing OCR file if available...")
                                     ocr_text = ""
-                                    if os.path.exists("logs/debug/rtc_ocr.txt"):
-                                        with open("logs/debug/rtc_ocr.txt", "r", encoding="utf-8") as f:
+                                    if os.path.exists(f"{log_dir}/rtc_ocr.txt"):
+                                        with open(f"{log_dir}/rtc_ocr.txt", "r", encoding="utf-8") as f:
                                             ocr_text = f.read()
-                                        print("Using existing OCR text from logs/debug/rtc_ocr.txt")
-                                    elif os.path.exists("logs/debug/rtc_ocr_text.txt"):
-                                        with open("logs/debug/rtc_ocr_text.txt", "r", encoding="utf-8") as f:
+                                        print(f"Using existing OCR text from {log_dir}/rtc_ocr.txt")
+                                    elif os.path.exists(f"{log_dir}/rtc_ocr_text.txt"):
+                                        with open(f"{log_dir}/rtc_ocr_text.txt", "r", encoding="utf-8") as f:
                                             ocr_text = f.read()
-                                        print("Using existing OCR text from logs/debug/rtc_ocr_text.txt")
+                                        print(f"Using existing OCR text from {log_dir}/rtc_ocr_text.txt")
                                 
                                 if ocr_text:
                                     # Parse OCR text to extract RTC fields
@@ -486,16 +487,16 @@ class BhoomiPublicScraper:
                     rtc_data["full_rtc_html"] = full_rtc_html
                     
                     # Save to JSON
-                    os.makedirs("logs/debug", exist_ok=True)
-                    with open("logs/debug/bhoomi_public_result.json", "w", encoding="utf-8") as f:
+                    os.makedirs(log_dir, exist_ok=True)
+                    with open(f"{log_dir}/bhoomi_public_result.json", "w", encoding="utf-8") as f:
                         json.dump(rtc_data, f, indent=2, ensure_ascii=False)
-                    print("Results saved to logs/debug/bhoomi_public_result.json")
+                    print(f"Results saved to {log_dir}/bhoomi_public_result.json")
                     
                     # Save English-only data to separate JSON
                     english_data = {k: v for k, v in rtc_data.items() if k.endswith('_en') or not k.endswith('_kn')}
-                    with open("logs/debug/bhoomi_public_result_english.json", "w", encoding="utf-8") as f:
+                    with open(f"{log_dir}/bhoomi_public_result_english.json", "w", encoding="utf-8") as f:
                         json.dump(english_data, f, indent=2, ensure_ascii=False)
-                    print("English results saved to logs/debug/bhoomi_public_result_english.json")
+                    print(f"English results saved to {log_dir}/bhoomi_public_result_english.json")
                     
                     # Save to CSV for easy viewing
                     import csv
@@ -504,11 +505,11 @@ class BhoomiPublicScraper:
                         if isinstance(value, str) and len(value) < 1000:  # Skip long HTML
                             csv_data.append([key, value])
                     
-                    with open("logs/debug/bhoomi_public_result.csv", "w", encoding="utf-8", newline='') as f:
+                    with open(f"{log_dir}/bhoomi_public_result.csv", "w", encoding="utf-8", newline='') as f:
                         writer = csv.writer(f)
                         writer.writerow(["Field", "Value"])
                         writer.writerows(csv_data)
-                    print("CSV results saved to logs/debug/bhoomi_public_result.csv")
+                    print(f"CSV results saved to {log_dir}/bhoomi_public_result.csv")
                     
                     print("\n=== EXTRACTED DATA ===")
                     print(json.dumps(rtc_data, indent=2, ensure_ascii=False))

@@ -173,18 +173,19 @@ class BhoomiPublicMutationScraper:
                     print("Fetch Details button clicked")
                     
                     # Take screenshot after Go
-                    os.makedirs("logs/debug", exist_ok=True)
-                    await page.screenshot(path='logs/debug/bhoomi_public_mutation_after_go.png')
-                    print("Screenshot saved: logs/debug/bhoomi_public_mutation_after_go.png")
+                    log_dir = "/Users/smrithis/Desktop/landrecords/logs/debug"
+                    os.makedirs(log_dir, exist_ok=True)
+                    await page.screenshot(path=f'{log_dir}/bhoomi_public_mutation_after_go.png')
+                    print(f"Screenshot saved: {log_dir}/bhoomi_public_mutation_after_go.png")
                     
                     # Extract mutation data from table
                     page_content = await page.content()
                     soup = BeautifulSoup(page_content, 'html.parser')
                     
                     # Save raw HTML for debugging
-                    with open("logs/debug/bhoomi_public_mutation_raw.html", "w", encoding="utf-8") as f:
+                    with open(f"{log_dir}/bhoomi_public_mutation_raw.html", "w", encoding="utf-8") as f:
                         f.write(page_content)
-                    print("Raw HTML saved to logs/debug/bhoomi_public_mutation_raw.html")
+                    print(f"Raw HTML saved to {log_dir}/bhoomi_public_mutation_raw.html")
                     
                     mutation_data = {
                         "district": district,
@@ -214,9 +215,9 @@ class BhoomiPublicMutationScraper:
                                     print(f"Found mutation row: {row_text}")
                     
                     # Save results
-                    with open("logs/debug/bhoomi_public_mutation_result.json", "w", encoding="utf-8") as f:
+                    with open(f"{log_dir}/bhoomi_public_mutation_result.json", "w", encoding="utf-8") as f:
                         json.dump(mutation_data, f, indent=2, ensure_ascii=False)
-                    print("Results saved to logs/debug/bhoomi_public_mutation_result.json")
+                    print(f"Results saved to {log_dir}/bhoomi_public_mutation_result.json")
                     
                     return mutation_data
                     

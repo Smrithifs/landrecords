@@ -76,12 +76,13 @@ class BhoomiBaseScraper:
         
         # Get CAPTCHA
         captcha_r = session.get("https://landrecords.karnataka.gov.in/citizenportal/GenerateCaptcha.aspx")
-        os.makedirs("logs/debug", exist_ok=True)
-        with open("logs/debug/captcha.png", "wb") as f:
+        log_dir = "/Users/smrithis/Desktop/landrecords/logs/debug"
+        os.makedirs(log_dir, exist_ok=True)
+        with open(f"{log_dir}/captcha.png", "wb") as f:
             f.write(captcha_r.content)
         
         print("=== LOGIN CAPTCHA ===")
-        print("CAPTCHA image saved to: logs/debug/captcha.png")
+        print(f"CAPTCHA image saved to: {log_dir}/captcha.png")
         print("Please enter the CAPTCHA and press ENTER to continue...")
         captcha = input("Enter CAPTCHA: ").strip()
         
