@@ -1,20 +1,96 @@
 import asyncio
 import os
 import time
-from typing import Dict, Optional
-from playwright.async_api import async_playwright, Error as PlaywrightError
+import re
+import json
+from typing import Dict, Optional, List, Any
+from playwright.async_api import async_playwright, Error as PlaywrightError, Page
 from bs4 import BeautifulSoup
 import requests
-import pytesseract
-from PIL import Image
-import re
-from datetime import datetime
+from urllib.parse import urljoin
 from scrapers.bhoomi_base import BhoomiBaseScraper, ScraperException
+from scrapers.bhoomi_public_mutation_scraper import (
+    _merge_no_dupes,
+    BhoomiPublicMutationScraper,
+)
 
 
 class BhoomiMutationScraper(BhoomiBaseScraper):
-    """Bhoomi Mutation Register scraper using Playwright with manual CAPTCHA handling"""
-    
+    def __init__(self, username: Optional[str] = None, password: Optional[str] = None):
+        super().__init__(username, password)
+        self.mr_url = "https://landrecords.karnataka.gov.in/Service11/MR_MutationExtract.aspx"
+        self.log_dir = "/Users/smrithis/Desktop/landrecords/logs/debug"
+        self.mutations_dir = os.path.join(self.log_dir, "mutations_auth")
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.mutations_dir, exist_ok=True)
+        self._delegate = BhoomiPublicMutationScraper.__new__(BhoomiPublicMutationScraper)
+        self._delegate.mr_url = self.mr_url
+        self._delegate.log_dir = self.log_dir
+        self._delegate.mutations_dir = self.mutations_dir
+
+    async def _fill_form_and_fetch(self, page: Page, district: str, taluk: str, hobli: str, village: str, survey_no: str):
+        district_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drpdist', district)
+        if not district_value:
+            raise ScraperException(f"District not found: {district}")
+        await page.select_option('#ctl00_MainContent_drpdist', value=district_value)
+
+        if not await self._wait_for_dropdown_options(page, '#ctl00_MainContent_drptaluk'):
+            raise ScraperException("Taluk dropdown failed to load")
+        taluk_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drptaluk', taluk)
+        if not taluk_value:
+            raise ScraperException(f"Taluk not found: {taluk}")
+        await page.select_option('#ctl00_MainContent_drptaluk', value=taluk_value)
+
+        if not await self._wait_for_dropdown_options(page, '#ctl00_MainContent_drphobli'):
+            raise ScraperException("Hobli dropdown failed to load")
+        hobli_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drphobli', hobli)
+        if not hobli_value:
+            raise ScraperException(f"Hobli not found: {hobli}")
+        await page.select_option('#ctl00_MainContent_drphobli', value=hobli_value)
+
+        if not await self._wait_for_dropdown_options(page, '#ctl00_MainContent_drpvillage'):
+            raise ScraperException("Village dropdown failed to load")
+        village_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drpvillage', village)
+        if not village_value:
+            raise ScraperException(f"Village not found: {village}")
+        await page.select_option('#ctl00_MainContent_drpvillage', value=village_value)
+
+        await page.fill('#ctl00_MainContent_txtSurvey', survey_no)
+
+        fetch_button = await page.query_selector('#ctl00_MainContent_btnFetch')
+        if fetch_button:
+            try:
+                if not await fetch_button.is_enabled():
+                    print("Fetch button disabled, waiting...")
+                    try:
+                        await page.wait_for_selector('#ctl00_MainContent_btnFetch:not([disabled])', timeout=30000)
+                    except PlaywrightError:
+                        pass
+                try:
+                    await fetch_button.click()
+                except PlaywrightError:
+                    await fetch_button.evaluate("b => b.click()")
+                print("Clicked Fetch Details button")
+            except Exception as e:
+                raise ScraperException(f"Failed to click Fetch Details: {e}")
+        else:
+            raise ScraperException("Fetch Details button not found")
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=30000)
+        except PlaywrightError:
+            pass
+        await page.wait_for_timeout(3000)
+        try:
+            await page.wait_for_selector(
+                'div:has-text("LOADING"), .loading, #loading, [id*="loading"], [class*="loading"]',
+                state="hidden", timeout=60000
+            )
+        except PlaywrightError:
+            pass
+        await page.wait_for_timeout(2000)
+        print("Fetch Details completed")
+
     async def fetch_mutation(
         self,
         district: str,
@@ -23,24 +99,7 @@ class BhoomiMutationScraper(BhoomiBaseScraper):
         village: str,
         survey_no: str
     ) -> Dict:
-        """
-        Fetch Mutation Register data from Bhoomi portal
-        
-        Args:
-            district: District name (e.g., 'BENGALURU')
-            taluk: Taluk name (e.g., 'Bangalore North (Additional)')
-            hobli: Hobli name (e.g., 'YALAHANKA1')
-            village: Village name (e.g., 'KRUSHNASAGARA')
-            survey_no: Survey number (e.g., '2')
-        
-        Returns:
-            Dict with mutation details
-        
-        Raises:
-            ScraperException: If any step fails
-        """
         async def _fetch():
-            # Check if we have a valid cached session
             if self._is_session_valid():
                 print("Using cached session (age: {:.1f} minutes)".format(
                     (time.time() - self._session_timestamp) / 60
@@ -49,335 +108,295 @@ class BhoomiMutationScraper(BhoomiBaseScraper):
             else:
                 print("Session cache expired or missing, performing fresh login")
                 cookies_for_playwright = await self._http_login()
-                print(f"Login successful. Cookies: {[c['name'] for c in cookies_for_playwright]}")
                 self._update_session_cache(cookies_for_playwright)
-            
-            # Playwright automation
+
             async with async_playwright() as p:
                 browser = await p.chromium.launch(headless=False)
                 context = await browser.new_context()
-                
-                # Inject cookies
                 await context.add_cookies(cookies_for_playwright)
                 page = await context.new_page()
-                
-                # Navigate directly to Mutation Extract page
-                await page.goto("https://landrecords.karnataka.gov.in/Service11/MR_MutationExtract.aspx")
-                await page.wait_for_load_state("networkidle")
-                print("Navigated to Mutation Extract page")
-                
-                # Check if logged in
-                if "Login" in page.url:
-                    await browser.close()
-                    self._session_cache = None
-                    self._session_timestamp = None
-                    raise ScraperException("Not logged in - cookies not working")
-                
-                # Select District
-                district_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drpdist', district)
-                if not district_value:
-                    await browser.close()
-                    raise ScraperException(f"District not found: {district}")
-                await page.select_option('#ctl00_MainContent_drpdist', value=district_value)
-                
-                # Wait for Taluk dropdown to load via AJAX
-                if not await self._wait_for_dropdown_options(page, '#ctl00_MainContent_drptaluk'):
-                    await browser.close()
-                    raise ScraperException("Taluk dropdown failed to load")
-                
-                # Select Taluk
-                taluk_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drptaluk', taluk)
-                if not taluk_value:
-                    await browser.close()
-                    raise ScraperException(f"Taluk not found: {taluk}")
-                await page.select_option('#ctl00_MainContent_drptaluk', value=taluk_value)
-                
-                # Wait for Hobli dropdown to load via AJAX
-                if not await self._wait_for_dropdown_options(page, '#ctl00_MainContent_drphobli'):
-                    await browser.close()
-                    raise ScraperException("Hobli dropdown failed to load")
-                
-                # Select Hobli
-                hobli_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drphobli', hobli)
-                if not hobli_value:
-                    await browser.close()
-                    raise ScraperException(f"Hobli not found: {hobli}")
-                await page.select_option('#ctl00_MainContent_drphobli', value=hobli_value)
-                
-                # Wait for Village dropdown to load via AJAX
-                if not await self._wait_for_dropdown_options(page, '#ctl00_MainContent_drpvillage'):
-                    await browser.close()
-                    raise ScraperException("Village dropdown failed to load")
-                
-                # Select Village
-                village_value = await self._match_dropdown_option(page, '#ctl00_MainContent_drpvillage', village)
-                if not village_value:
-                    await browser.close()
-                    raise ScraperException(f"Village not found: {village}")
-                await page.select_option('#ctl00_MainContent_drpvillage', value=village_value)
-                
-                # Enter survey number (text input, not dropdown)
-                await page.fill('#ctl00_MainContent_txtSurvey', survey_no)
-                
-                # Debug Fetch Details button state before clicking
-                fetch_button = await page.query_selector('#ctl00_MainContent_btnFetch')
-                if fetch_button:
-                    button_exists = True
-                    button_enabled = await fetch_button.is_enabled()
-                    button_visible = await fetch_button.is_visible()
-                    button_value = await fetch_button.get_attribute('value')
-                    print(f"=== FETCH DETAILS BUTTON STATE ===")
-                    print(f"Button exists: {button_exists}")
-                    print(f"Button enabled: {button_enabled}")
-                    print(f"Button visible: {button_visible}")
-                    print(f"Button text: {button_value}")
-                    
-                    # Wait until button is enabled
-                    if not button_enabled:
-                        print("Button is disabled, waiting for it to be enabled...")
-                        try:
-                            await page.wait_for_selector('#ctl00_MainContent_btnFetch:not([disabled])', timeout=30000)
-                            print("Button is now enabled")
-                        except PlaywrightError:
-                            print("Button did not become enabled within timeout, clicking anyway")
-                    
-                    # Try to click using locator.click()
-                    try:
-                        await fetch_button.click()
-                        print("Clicked Fetch Details button using locator.click()")
-                    except PlaywrightError as e:
-                        print(f"locator.click() failed: {e}, trying evaluate...")
-                        try:
-                            await fetch_button.evaluate("button => button.click()")
-                            print("Clicked Fetch Details button using evaluate()")
-                        except Exception as e2:
-                            print(f"evaluate() also failed: {e2}")
-                            raise ScraperException(f"Failed to click Fetch Details button: {e2}")
-                else:
-                    raise ScraperException("Fetch Details button not found")
-                
-                # Wait for table to load
-                print("Waiting for mutation details table to load...")
                 try:
-                    # Wait for networkidle first
-                    await page.wait_for_load_state("networkidle", timeout=30000)
-                    print("Network idle reached")
-                except PlaywrightError:
-                    print("Network idle timeout, proceeding anyway")
-                
-                await page.wait_for_timeout(3000)
-                
-                # Try to wait for loading element to disappear
-                try:
-                    await page.wait_for_selector('div:has-text("LOADING"), .loading, #loading, [id*="loading"], [class*="loading"]', state="hidden", timeout=60000)
-                    print("Loading complete")
-                except PlaywrightError:
-                    print("No loading element found or timeout, proceeding anyway")
-                
-                await page.wait_for_timeout(2000)
-                
-                # Initialize mutation data
-                mutation_data = {
-                    "district": district,
-                    "taluk": taluk,
-                    "hobli": hobli,
-                    "village": village,
-                    "survey_no": survey_no,
-                    "mutations": [],
-                    "mutation_details": []
-                }
-                
-                # Extract mutation details table
-                print("Extracting mutation details from table...")
-                page_content = await page.content()
-                soup = BeautifulSoup(page_content, 'html.parser')
-                
-                # Find the mutation details table
-                tables = soup.find_all('table')
-                mutation_table = None
-                
-                for table in tables:
-                    # Look for table with mutation-related headers
-                    headers = table.find_all('th')
-                    header_texts = [h.get_text(strip=True) for h in headers]
-                    if any('Survey' in h or 'Transaction' in h or 'MR' in h or 'Mutation' in h for h in header_texts):
-                        mutation_table = table
-                        print(f"Found mutation table with headers: {header_texts}")
-                        break
-                
-                if mutation_table:
-                    rows = mutation_table.find_all('tr')
-                    
-                    # Build header mapping from first row
-                    header_mapping = {}
-                    if rows:
-                        header_row = rows[0]
-                        headers = header_row.find_all('th')
-                        print("=== DETECTED TABLE HEADERS ===")
-                        for idx, header in enumerate(headers):
-                            header_text = header.get_text(strip=True)
-                            print(f"{idx}: {header_text}")
-                            # Map header text to column index
-                            header_mapping[header_text] = idx
-                    
-                    # Parse data rows (skip header row)
-                    for row in rows[1:]:
-                        cols = row.find_all('td')
-                        if cols:
-                            mutation_row = {
-                                "survey_no": None,
-                                "transaction_year": None,
-                                "transaction_no": None,
-                                "mr_number": None,
-                                "mutation_type": None,
-                                "acquisition_type": None,
-                                "approved_date": None
-                            }
-                            
-                            # Extract data using header mapping
-                            for header_name, col_idx in header_mapping.items():
-                                if col_idx < len(cols):
-                                    value = cols[col_idx].get_text(strip=True)
-                                    
-                                    if "Survey" in header_name and "No" in header_name:
-                                        mutation_row["survey_no"] = value
-                                    elif "Transaction" in header_name and "Year" in header_name:
-                                        mutation_row["transaction_year"] = value
-                                    elif "Transaction" in header_name and "No" in header_name:
-                                        mutation_row["transaction_no"] = value
-                                    elif "MR" in header_name and "Number" in header_name:
-                                        mutation_row["mr_number"] = value
-                                    elif "Mutation" in header_name and "Type" in header_name:
-                                        mutation_row["mutation_type"] = value
-                                    elif "Acquisition" in header_name and "Type" in header_name:
-                                        mutation_row["acquisition_type"] = value
-                                    elif "Approved" in header_name or "Date" in header_name:
-                                        mutation_row["approved_date"] = value
-                            
-                            mutation_data["mutations"].append(mutation_row)
-                            print(f"Found mutation: MR {mutation_row['mr_number']}")
-                
-                # Print rows found
-                print(f"\nRows found after Fetch Details: {len(mutation_data['mutations'])}")
-                
-                # If no rows found, take screenshot and save HTML for debugging
-                if len(mutation_data["mutations"]) == 0:
-                    print("No mutation rows found, saving debug information...")
-                    os.makedirs("logs/debug", exist_ok=True)
-                    screenshot_path = "logs/debug/mutation_after_fetch.png"
-                    await page.screenshot(path=screenshot_path, full_page=True)
-                    print(f"Screenshot saved to: {os.path.abspath(screenshot_path)}")
-                    
-                    html_path = "logs/debug/mutation_after_fetch.html"
-                    page_content = await page.content()
-                    with open(html_path, "w", encoding="utf-8") as f:
-                        f.write(page_content)
-                    print(f"Page HTML saved to: {os.path.abspath(html_path)}")
-                
-                # For each mutation row, click Select and extract details
-                for idx, mutation in enumerate(mutation_data["mutations"]):
-                    mr_number = mutation["mr_number"]
-                    if not mr_number:
-                        continue
-                    
-                    print(f"\nProcessing mutation {idx + 1}/{len(mutation_data['mutations'])}: MR {mr_number}")
-                    
-                    # Find and click Select link for this row
-                    try:
-                        # Find all Select links in the table
-                        select_links = await page.query_selector_all('a:has-text("Select")')
-                        print(f"Found {len(select_links)} Select links")
-                        
-                        if select_links and idx < len(select_links):
-                            # Click the idx-th Select link
-                            await select_links[idx].click()
-                            print(f"Clicked Select link {idx} for MR {mr_number}")
-                            await page.wait_for_load_state("networkidle")
-                            await page.wait_for_timeout(2000)
-                            
-                            # Extract additional fields from the opened page/panel
-                            detail_content = await page.content()
-                            detail_soup = BeautifulSoup(detail_content, 'html.parser')
-                            
-                            detail_data = {
-                                "mr_number": mr_number,
-                                "additional_fields": {}
-                            }
-                            
-                            # Extract all text content from the detail view
-                            # Try to find structured data in tables
-                            detail_tables = detail_soup.find_all('table')
-                            for table in detail_tables:
-                                rows = table.find_all('tr')
-                                for row in rows:
-                                    cols = row.find_all('td')
-                                    if cols and len(cols) >= 2:
-                                        label = cols[0].get_text(strip=True)
-                                        value = cols[1].get_text(strip=True)
-                                        if label and value:
-                                            detail_data["additional_fields"][label] = value
-                            
-                            # Take screenshot of the detail view
-                            os.makedirs("logs/debug", exist_ok=True)
-                            screenshot_path = f"logs/debug/mutation_{mr_number}.png"
-                            await page.screenshot(path=screenshot_path, full_page=True)
-                            detail_data["screenshot_path"] = screenshot_path
-                            print(f"Screenshot saved to: {os.path.abspath(screenshot_path)}")
-                            
-                            # Try to find document/image
-                            doc_element = await page.query_selector('img[src*="Mutation"], img[src*="mutation"], img[src*="MR"], img[src*="mr"]')
-                            if doc_element:
-                                doc_path = f"logs/debug/mutation_{mr_number}_doc.png"
-                                await doc_element.screenshot(path=doc_path)
-                                detail_data["document_path"] = doc_path
-                                print(f"Captured document to: {os.path.abspath(doc_path)}")
-                            else:
-                                # Try to find PDF link
-                                pdf_link = await page.query_selector('a[href*=".pdf"]')
-                                if pdf_link:
-                                    pdf_url = await pdf_link.get_attribute('href')
-                                    print(f"Found PDF URL: {pdf_url}")
+                    await page.goto(self.mr_url)
+                    await page.wait_for_load_state("networkidle")
+                    print("Navigated to Mutation Extract page")
+                    if "Login" in page.url:
+                        self._session_cache = None
+                        self._session_timestamp = None
+                        raise ScraperException("Not logged in - session cookies expired")
+
+                    await self._fill_form_and_fetch(page, district, taluk, hobli, village, survey_no)
+                    mutation_rows = await self._delegate._extract_mutation_table(page)
+                    print(f"\nTotal mutations found: {len(mutation_rows)}")
+
+                    base_context = {
+                        "district": district,
+                        "taluk": taluk,
+                        "hobli": hobli,
+                        "village": village,
+                        "survey_no_query": survey_no,
+                    }
+
+                    index_entries: List[Dict] = []
+                    successes = 0
+                    failures = 0
+
+                    for idx, row in enumerate(mutation_rows):
+                        mr = str(row.get("mr_number") or "")
+                        ty = str(row.get("transaction_year") or "")
+                        tn = str(row.get("transaction_no") or "")
+                        surv = str(row.get("survey_no") or survey_no)
+                        mutation_key = self._delegate._safe_filename(
+                            f"MR{mr}", f"TY{ty.replace('-', '_')}", f"TN{tn}", f"S{surv.replace('/', '-')}"
+                        )
+                        print(f"\n{'='*60}")
+                        print(f"[{idx+1}/{len(mutation_rows)}] Processing {mutation_key}")
+                        print(f"{'='*60}")
+
+                        if idx > 0:
+                            try:
+                                if "MR_MutationExtract.aspx" not in page.url and "ReportPreview" in page.url:
+                                    await self._delegate._navigate_back_to_list(page)
+                                try:
+                                    sel_test = await page.query_selector_all('a:has-text("Select")')
+                                    if len(sel_test) < max(2, idx + 1):
+                                        print("  Table missing — re-filling form...")
+                                        await page.goto(self.mr_url)
+                                        await page.wait_for_load_state("networkidle")
+                                        await self._fill_form_and_fetch(page, district, taluk, hobli, village, survey_no)
+                                except Exception:
+                                    await page.goto(self.mr_url)
+                                    await page.wait_for_load_state("networkidle")
+                                    await self._fill_form_and_fetch(page, district, taluk, hobli, village, survey_no)
+                            except Exception as refill_e:
+                                print(f"  (refill issue: {refill_e}, continuing)")
+
+                        record: Dict[str, Any] = {
+                            "id": mutation_key,
+                            "context": base_context,
+                            "from_table_row": row,
+                            "selected_items": {},
+                            "report_preview": None,
+                        }
+
+                        try:
+                            select_links = await page.query_selector_all('a:has-text("Select")')
+                            if idx >= len(select_links):
+                                print(f"  WARNING: only {len(select_links)} Select links, need idx {idx}")
+                            assert idx < len(select_links), f"No Select link at index {idx}"
+                            link = select_links[idx]
+                            try:
+                                await link.scroll_into_view_if_needed()
+                                await link.click()
+                            except PlaywrightError:
+                                await link.evaluate("e => e.click()")
+                            print("  [1/3] Clicked Select")
+                            record["selected_items"] = await self._delegate._extract_selected_items(page)
+                            print("  [2/3] Extracted Selected Items panel")
+                        except Exception as sel_err:
+                            print(f"  Select step failed: {sel_err}")
+                            record["error"] = f"select_failed: {sel_err}"
+                            failures += 1
+                            await self._save_single_record(record, mutation_key)
+                            index_entries.append(record)
+                            continue
+
+                        try:
+                            ps_list = ['#ctl00_MainContent_btnPreview', 'input[value*="Preview"]',
+                                       'button:has-text("Preview")', 'a:has-text("Preview")', 'text=Preview']
+                            preview_clicked = False
+                            preview_page = page
+                            pages_before = set(context.pages)
+                            url_before = page.url
+
+                            for ps in ps_list:
+                                el = None
+                                try:
+                                    el = await page.query_selector(ps)
+                                except Exception:
+                                    pass
+                                if not el or not await el.is_visible():
+                                    continue
+                                await el.scroll_into_view_if_needed()
+                                await page.wait_for_timeout(500)
+                                got_it = False
+                                try:
+                                    async with page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                                        try:
+                                            await el.click(timeout=7000)
+                                        except Exception:
+                                            await el.evaluate("e => e.click()")
+                                    preview_clicked, preview_page = True, page
+                                    print(f"  [3/3] Clicked Preview ({ps}) — same-page nav")
+                                    got_it = True
+                                    break
+                                except Exception:
+                                    pass
+                                if not got_it:
                                     try:
-                                        cookies = await context.cookies()
-                                        cookie_dict = {c['name']: c['value'] for c in cookies}
-                                        headers = {
-                                            'Referer': page.url,
-                                            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                                        }
-                                        response = requests.get(pdf_url, cookies=cookie_dict, headers=headers, allow_redirects=True)
-                                        if response.status_code == 200:
-                                            pdf_path = f"logs/debug/mutation_{mr_number}.pdf"
-                                            with open(pdf_path, 'wb') as f:
-                                                f.write(response.content)
-                                            detail_data["document_path"] = pdf_path
-                                            print(f"Downloaded PDF to: {os.path.abspath(pdf_path)}")
-                                    except Exception as e:
-                                        print(f"PDF download failed: {e}")
-                            
-                            mutation_data["mutation_details"].append(detail_data)
-                            
-                            # Go back to the main table
-                            await page.go_back()
-                            await page.wait_for_load_state("networkidle")
-                            await page.wait_for_timeout(1000)
-                        else:
-                            print(f"No Select link found for MR {mr_number}")
-                    except Exception as e:
-                        print(f"Error processing MR {mr_number}: {e}")
-                        # Try to go back if we navigated
+                                        popup_task = asyncio.create_task(context.wait_for_event("page", timeout=20000))
+                                        try:
+                                            try:
+                                                await el.click(timeout=7000)
+                                            except Exception:
+                                                await el.evaluate("e => e.click()")
+                                        except Exception:
+                                            pass
+                                        np = await popup_task
+                                        try:
+                                            await np.wait_for_load_state("domcontentloaded", timeout=15000)
+                                        except Exception:
+                                            pass
+                                        preview_page, preview_clicked = np, True
+                                        print(f"  [3/3] Clicked Preview ({ps}) — NEW TAB: {np.url[:150]}")
+                                        got_it = True
+                                        break
+                                    except Exception:
+                                        pass
+                                if not got_it:
+                                    try:
+                                        try:
+                                            await el.click(timeout=7000)
+                                        except Exception:
+                                            await el.evaluate("e => e.click()")
+                                        await page.wait_for_timeout(3000)
+                                        try:
+                                            await page.wait_for_load_state("networkidle", timeout=15000)
+                                        except Exception:
+                                            pass
+                                        nps = [p for p in context.pages if p not in pages_before]
+                                        if nps:
+                                            preview_page = nps[0]
+                                            try:
+                                                await preview_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                                            except Exception:
+                                                pass
+                                            preview_clicked = True
+                                            print(f"  [3/3] Clicked Preview ({ps}) — new tab detected: {preview_page.url[:150]}")
+                                            break
+                                        if "ReportPreview" in page.url or page.url != url_before:
+                                            preview_page, preview_clicked = page, True
+                                            print(f"  [3/3] Clicked Preview ({ps}) — URL changed: {page.url[:150]}")
+                                            break
+                                    except Exception:
+                                        continue
+
+                            if not preview_clicked:
+                                nps = [p for p in context.pages if p not in pages_before]
+                                if nps:
+                                    preview_page, preview_clicked = nps[0], True
+                                    print(f"  [3/3] Fallback new-page check found preview: {preview_page.url[:150]}")
+                            if not preview_clicked:
+                                print("  WARNING: No Preview nav confirmed. Extracting on current page anyway.")
+
+                            try:
+                                await preview_page.wait_for_load_state("networkidle", timeout=15000)
+                            except Exception:
+                                pass
+                            try:
+                                await preview_page.bring_to_front()
+                            except Exception:
+                                pass
+                            print(f"  Extracting report from: {preview_page.url[:150]}")
+                            record["report_preview"] = await self._delegate._extract_report_preview(
+                                preview_page, context, mutation_key
+                            )
+                            successes += 1
+
+                            try:
+                                if preview_page is not page and len(context.pages) > 1:
+                                    try:
+                                        await preview_page.close()
+                                        print("  Closed preview tab")
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        except Exception as prev_err:
+                            print(f"  Preview step failed: {prev_err}")
+                            import traceback
+                            traceback.print_exc()
+                            record["error"] = f"preview_failed: {prev_err}"
+                            failures += 1
+
+                        merged_clean: Dict[str, Any] = {
+                            "id": mutation_key,
+                            "context": base_context,
+                        }
+                        sources = [
+                            record.get("from_table_row") or {},
+                            record.get("selected_items") or {},
+                            (record.get("report_preview") or {}).get("report_header") or {},
+                            (record.get("report_preview") or {}).get("footer") or {},
+                        ]
+                        merged_clean["fields"] = _merge_no_dupes(*sources)
+                        rpt = record.get("report_preview")
+                        if rpt:
+                            merged_clean["land_area"] = rpt.get("land_area_table", [])
+                            merged_clean["mutation_parties"] = rpt.get("parties_table", [])
+                            for path_key in ("document_path", "screenshot_path", "html_path", "preview_page_url"):
+                                if rpt.get(path_key):
+                                    if path_key == "screenshot_path":
+                                        merged_clean["preview_screenshot"] = rpt[path_key]
+                                    elif path_key == "html_path":
+                                        merged_clean["preview_html"] = rpt[path_key]
+                                    elif path_key == "preview_page_url":
+                                        merged_clean["preview_url"] = rpt[path_key]
+                                    else:
+                                        merged_clean[path_key] = rpt[path_key]
+                        if record.get("error"):
+                            merged_clean["error"] = record["error"]
+
+                        await self._save_single_record(merged_clean, mutation_key)
+                        index_entries.append(merged_clean)
+
                         try:
-                            await page.go_back()
-                            await page.wait_for_load_state("networkidle")
-                        except:
-                            pass
-                
-                await browser.close()
-                
-                # Print final JSON
-                print("\n=== FINAL MUTATION DATA ===")
-                import json
-                print(json.dumps(mutation_data, indent=2, ensure_ascii=False))
-                
-                return mutation_data
-        
+                            await self._delegate._navigate_back_to_list(page)
+                        except Exception as back_err:
+                            print(f"  Back nav issue: {back_err}")
+
+                    combined_path = os.path.join(self.mutations_dir, "ALL_MUTATIONS_COMBINED.json")
+                    combined = {
+                        "search": base_context,
+                        "total_found": len(mutation_rows),
+                        "total_processed": len(index_entries),
+                        "successful_extractions": successes,
+                        "failures": failures,
+                        "generated_at": __import__("datetime").datetime.now().isoformat(),
+                        "mutations": index_entries,
+                    }
+                    with open(combined_path, "w", encoding="utf-8") as f:
+                        json.dump(combined, f, indent=2, ensure_ascii=False)
+
+                    print(f"\n{'='*60}")
+                    print(f"SUMMARY (AUTHENTICATED)")
+                    print(f"  Total found:       {len(mutation_rows)}")
+                    print(f"  Successful:        {successes}")
+                    print(f"  Failed:            {failures}")
+                    print(f"  Individual JSONs:  {self.mutations_dir}/MR*__*.json")
+                    print(f"  Combined index:    {combined_path}")
+                    print(f"{'='*60}")
+
+                    print("\n=== SAMPLE (first mutation merged fields) ===")
+                    for i, md in enumerate(index_entries[:1]):
+                        print(f"\nMutation ID: {md.get('id')}")
+                        fields = md.get("fields", {})
+                        for k, v in list(fields.items())[:20]:
+                            print(f"  {k}: {v}")
+                        if len(fields) > 20:
+                            print(f"  ... +{len(fields)-20} more fields")
+                        print(f"  Land area rows:  {len(md.get('land_area', []))}")
+                        print(f"  Party rows:      {len(md.get('mutation_parties', []))}")
+
+                    return combined
+
+                finally:
+                    await browser.close()
+
         return await self._retry_with_backoff(_fetch)
+
+    async def _save_single_record(self, record: Dict, mutation_key: str):
+        path = os.path.join(self.mutations_dir, f"{mutation_key}.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+        print(f"  Saved: {os.path.basename(path)}")
+        return path

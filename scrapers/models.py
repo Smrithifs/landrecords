@@ -505,3 +505,100 @@ class ECourtsOutput(BaseModel):
                 "source": "eCourts"
             }
         }
+
+
+class KarnatakaHCInput(BaseModel):
+    """Input model for Karnataka High Court party-name search (Bengaluru Bench)."""
+    
+    owner_name: str = Field(..., description="Owner / party name to search (English)")
+    bench: str = Field(default="B", description="Bench code: B=Bengaluru, D=Dharwad, K=Kalaburagi")
+    case_types: List[str] = Field(default_factory=lambda: ["WP", "CP.KLRA", "LRRP", "RFA", "RSA", "CRP", "WA"],
+                                  description="Case types to check (High Court of Karnataka case-type codes)")
+    pet_res_code: str = Field(default="0", description="Party role code: 1=Petitioner, 2=Respondent, 0=Don't Know")
+    filing_from: str = Field(default="01-08-2025", description="Filing date from (DD-MM-YYYY)")
+    filing_to: str = Field(default="01-08-2026", description="Filing date to (DD-MM-YYYY)")
+    aliases: Optional[List[str]] = Field(default=None, description="Optional alias variants of the owner name to try")
+    survey_no: Optional[str] = Field(None, description="Optional survey number (metadata only, for risk reporting)")
+    property_address: Optional[str] = Field(None, description="Optional property address (metadata only, for risk reporting)")
+
+    @field_validator('owner_name')
+    @classmethod
+    def validate_owner_name(cls, v):
+        if not v or not v.strip():
+            raise ValueError("owner_name cannot be empty")
+        return v.strip()
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "owner_name": "Gali Hanumayya",
+                "bench": "B",
+                "case_types": ["WP", "RFA", "CRP"],
+                "pet_res_code": "0",
+                "filing_from": "01-08-2025",
+                "filing_to": "01-08-2026",
+                "aliases": ["Hanumayya Gali", "Hanumayya"],
+                "survey_no": "123",
+                "property_address": "Jayanagar, Bengaluru"
+            }
+        }
+
+
+class KarnatakaHCCase(BaseModel):
+    """Structured case row from Karnataka HC search results."""
+    case_number: Optional[str] = Field(None, description="Case number (e.g. WP 12345/2025)")
+    case_type: Optional[str] = Field(None, description="Case type code (WP, RFA, etc.)")
+    filing_date: Optional[str] = Field(None, description="Date of filing")
+    status: Optional[str] = Field(None, description="Current status / stage")
+    next_hearing_date: Optional[str] = Field(None, description="Next date of hearing")
+    bench: Optional[str] = Field(None, description="Bench / judge info")
+    subject: Optional[str] = Field(None, description="Subject / category")
+    petitioner: Optional[str] = Field(None, description="Petitioner name(s)")
+    respondent: Optional[str] = Field(None, description="Respondent name(s)")
+    advocate_petitioner: Optional[str] = Field(None, description="Petitioner advocate")
+    advocate_respondent: Optional[str] = Field(None, description="Respondent advocate")
+    raw_row: Dict[str, str] = Field(default_factory=dict, description="Raw key-value pairs from the HTML table row")
+
+
+class KarnatakaHCOutput(BaseModel):
+    """Aggregated output from Karnataka HC search for one owner."""
+    owner_name: str = Field(..., description="Primary owner name that was searched")
+    bench_code: str = Field(..., description="Bench code used")
+    bench_label: str = Field(..., description="Bench label (e.g. Bengaluru Bench)")
+    filing_from: str = Field(..., description="Filing date range start")
+    filing_to: str = Field(..., description="Filing date range end")
+    case_types_checked: List[str] = Field(default_factory=list, description="Case type codes checked")
+    aliases_tried: List[str] = Field(default_factory=list, description="Alias variants searched")
+    total_cases_found: int = Field(0, description="Total case rows detected across all searches")
+    distinct_cases: List[KarnatakaHCCase] = Field(default_factory=list, description="Deduplicated structured case list")
+    has_active_litigation: bool = Field(False, description="True if at least one case row found (not 'No Record')")
+    no_record_case_types: List[str] = Field(default_factory=list, description="Case type searches that explicitly returned 'No Record'")
+    per_case_type_summary: Dict[str, Dict[str, int]] = Field(default_factory=dict, description="Case counts per case_type code")
+    search_summaries: List[Dict[str, Any]] = Field(default_factory=list, description="Raw per-search records from the scraper")
+    extraction_errors: List[str] = Field(default_factory=list, description="Errors encountered during scraping")
+    scraped_at: datetime = Field(default_factory=datetime.utcnow, description="Timestamp when run finished")
+    source: str = Field(default="KarnatakaHC", description="Data source label")
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "owner_name": "Gali Hanumayya",
+                "bench_code": "B",
+                "bench_label": "Bengaluru Bench",
+                "filing_from": "01-08-2025",
+                "filing_to": "01-08-2026",
+                "case_types_checked": ["WP"],
+                "aliases_tried": ["Gali Hanumayya"],
+                "total_cases_found": 1,
+                "distinct_cases": [
+                    {
+                        "case_number": "WP 10001/2025",
+                        "case_type": "WP",
+                        "status": "Pending",
+                        "next_hearing_date": "15-09-2025",
+                    }
+                ],
+                "has_active_litigation": True,
+                "no_record_case_types": [],
+            }
+        }

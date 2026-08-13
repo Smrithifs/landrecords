@@ -183,32 +183,56 @@ class BhoomiMutationStatusScraper:
                     
                     # Enter Survey Number
                     await page.fill('#MainContent_txtSurvey', survey_no)
-                    await page.wait_for_timeout(1000)
+                    await page.wait_for_timeout(2000)
                     print(f"Survey number entered: {survey_no}")
                     
-                    # Select Surnoc if provided
-                    if surnoc:
-                        if not await self._wait_for_dropdown_options(page, '#MainContent_drpsurnoc'):
-                            await browser.close()
-                            raise ScraperException("Surnoc dropdown failed to load")
-                        
-                        surnoc_value = await self._match_dropdown_option(page, '#MainContent_drpsurnoc', surnoc)
-                        if surnoc_value:
-                            await page.select_option('#MainContent_drpsurnoc', value=surnoc_value)
-                            await page.wait_for_load_state("networkidle")
-                            print(f"Surnoc selected: {surnoc}")
+                    # Select Surnoc - always select first option if not provided
+                    surnoc_value = None
+                    try:
+                        if not await self._wait_for_dropdown_options(page, '#MainContent_drpsurnoc', timeout=10000):
+                            print("Surnoc dropdown failed to load, skipping...")
+                        else:
+                            if surnoc:
+                                surnoc_value = await self._match_dropdown_option(page, '#MainContent_drpsurnoc', surnoc)
+                            else:
+                                # Select first option
+                                surnoc_options = await page.query_selector_all('#MainContent_drpsurnoc option')
+                                if surnoc_options:
+                                    surnoc_value = await surnoc_options[0].get_attribute('value')
+                                    print(f"Surnoc: selecting first option")
+                                else:
+                                    surnoc_value = None
+                            
+                            if surnoc_value:
+                                await page.select_option('#MainContent_drpsurnoc', value=surnoc_value)
+                                await page.wait_for_load_state("networkidle")
+                                print(f"Surnoc selected: {surnoc_value}")
+                    except Exception as e:
+                        print(f"Surnoc selection failed: {e}, continuing...")
                     
-                    # Select Hissa if provided
-                    if hissa:
-                        if not await self._wait_for_dropdown_options(page, '#MainContent_drphissa'):
-                            await browser.close()
-                            raise ScraperException("Hissa dropdown failed to load")
-                        
-                        hissa_value = await self._match_dropdown_option(page, '#MainContent_drphissa', hissa)
-                        if hissa_value:
-                            await page.select_option('#MainContent_drphissa', value=hissa_value)
-                            await page.wait_for_load_state("networkidle")
-                            print(f"Hissa selected: {hissa}")
+                    # Select Hissa - always select first option if not provided
+                    hissa_value = None
+                    try:
+                        if not await self._wait_for_dropdown_options(page, '#MainContent_drphissa', timeout=10000):
+                            print("Hissa dropdown failed to load, skipping...")
+                        else:
+                            if hissa:
+                                hissa_value = await self._match_dropdown_option(page, '#MainContent_drphissa', hissa)
+                            else:
+                                # Select first option
+                                hissa_options = await page.query_selector_all('#MainContent_drphissa option')
+                                if hissa_options:
+                                    hissa_value = await hissa_options[0].get_attribute('value')
+                                    print(f"Hissa: selecting first option")
+                                else:
+                                    hissa_value = None
+                            
+                            if hissa_value:
+                                await page.select_option('#MainContent_drphissa', value=hissa_value)
+                                await page.wait_for_load_state("networkidle")
+                                print(f"Hissa selected: {hissa_value}")
+                    except Exception as e:
+                        print(f"Hissa selection failed: {e}, continuing...")
                     
                     # Click Fetch Details button using ASP.NET postback
                     print("Clicking Fetch Details button...")
@@ -267,8 +291,8 @@ class BhoomiMutationStatusScraper:
                         "hobli": hobli,
                         "village": village,
                         "survey_no": survey_no,
-                        "surnoc": surnoc,
-                        "hissa": hissa,
+                        "surnoc": surnoc_value,
+                        "hissa": hissa_value,
                         "mutation_pending": False,
                         "status": None,
                         "status_original": None,
@@ -278,39 +302,69 @@ class BhoomiMutationStatusScraper:
                     # First check for status message (no mutation pending)
                     status_message = None
                     
-                    # Look for the last blue line (status message) in the page
-                    # Check all text elements for status messages, focusing on the last meaningful text
-                    all_text_elements = soup.find_all(['span', 'div', 'label', 'p', 'td'])
-                    kannada_texts = []
-                    for element in all_text_elements:
-                        text = element.get_text(strip=True)
-                        # Look for Kannada text that might be a status message
-                        if text and len(text) > 5 and any('\u0C80' <= char <= '\u0CFF' for char in text):
-                            # Filter out dropdown options (too long, contains many district names)
-                            if len(text) < 200:  # Status messages are usually shorter
-                                kannada_texts.append(text)
-    
-                    # Use the last Kannada text as the status message
-                    if kannada_texts:
-                        status_message = kannada_texts[-1]
-                        print(f"Found status message (Kannada): {status_message}")
-    
-                    # If no Kannada text found, look for English status messages
-                    if not status_message:
-                        status_keywords = ['no mutation', 'mutation pending', 'status', 'pending', 'approved', 'rejected']
-                        for element in all_text_elements:
-                            text = element.get_text(strip=True)
-                            if text and any(keyword.lower() in text.lower() for keyword in status_keywords):
-                                status_message = text
-                                print(f"Found status message (English): {status_message}")
+                    # Look for specific status message elements
+                    # Try to find elements with specific IDs or classes that contain status
+                    status_selectors = [
+                        '#MainContent_lblStatus',
+                        '#lblStatus',
+                        'span[id*="Status"]',
+                        'div[id*="Status"]',
+                        '.status-message',
+                        '.alert',
+                        '#MainContent_divStatus',
+                    ]
+                    
+                    for selector in status_selectors:
+                        status_element = soup.select_one(selector)
+                        if status_element:
+                            status_message = status_element.get_text(strip=True)
+                            if status_message and len(status_message) > 3 and len(status_message) < 200:
+                                print(f"Found status message via selector {selector}: {status_message}")
                                 break
+                    
+                    # If no specific status element found, look for text in the main content area
+                    if not status_message:
+                        # Look for the main content div and extract text from there
+                        main_content = soup.select_one('#MainContent')
+                        if main_content:
+                            # Get all text from main content, excluding form elements
+                            all_text = main_content.get_text(separator='\n', strip=True)
+                            lines = [line.strip() for line in all_text.split('\n') if line.strip()]
+                            
+                            # Look for status-like lines (not dropdown options, not labels)
+                            for line in lines:
+                                # Skip common non-status lines
+                                skip_keywords = ['district', 'taluk', 'hobli', 'village', 'survey', 'select', 'surnoc', 'hissa', 
+                                               'belagavi', 'bagalkote', 'vijayapura', 'kalaburagi', 'bidar', 'raichur',
+                                               'koppal', 'gadag', 'dharwad', 'uttar', 'hav', 'ballari', 'chitradurga',
+                                               'davanagere', 'shivamogga', 'udupi', 'chikkamagaluru', 'tumakuru',
+                                               'kolar', 'bengaluru', 'bangalore', 'rural', 'mandya', 'hassan',
+                                               'dakshina', 'kodagu', 'mysore', 'chamarajanagara', 'ramanagara',
+                                               'yadagir', 'vijayanagara', 'anekal', 'yelahanka', 'copyright',
+                                               'designed', 'hosted', 'bhoomi', 'monitoring', 'cell', 'rights',
+                                               'reserved', 'beta', 'version', 'logout', 'toggle', 'navigation']
+                                
+                                line_lower = line.lower()
+                                if not any(kw in line_lower for kw in skip_keywords):
+                                    # Status messages are usually short and meaningful
+                                    if 5 < len(line) < 150:
+                                        # Check if it contains Kannada or status keywords
+                                        if any('\u0C80' <= char <= '\u0CFF' for char in line) or \
+                                           any(kw in line_lower for kw in ['no', 'mutation', 'pending', 'status', 'approved', 'rejected', 'record', 'found']):
+                                            status_message = line
+                                            print(f"Found status message from main content: {status_message}")
+                                            break
     
                     if status_message:
                         # Translate if in Kannada
                         status_data["status_original"] = status_message
                         status_data["status"] = self.translate_text(status_message)
                         # Determine if mutation is pending based on status
-                        if 'pending' in status_data["status"].lower() or 'ಬಾಕಿ' in status_message or 'ನಮೂದಾಗಬೇಕಿದೆ' in status_message:
+                        status_lower = status_data["status"].lower()
+                        # Check for "no mutation pending" (false) vs "mutation pending" (true)
+                        if 'no mutation pending' in status_lower or 'no pending' in status_lower or 'ಬಾಕಿ ಇರುವುದಿಲ್ಲ' in status_message:
+                            status_data["mutation_pending"] = False
+                        elif 'mutation pending' in status_lower or 'ಬಾಕಿ' in status_message or 'ನಮೂದಾಗಬೇಕಿದೆ' in status_message:
                             status_data["mutation_pending"] = True
                         else:
                             status_data["mutation_pending"] = False

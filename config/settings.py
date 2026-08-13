@@ -58,7 +58,8 @@ class Settings:
         "BBMP",
         "BESCOM",
         "BWSSB",
-        "eCourts"
+        "eCourts",
+        "KarnatakaHC"
     ]
     
     DEFAULT_DISTRICT = "Bengaluru Urban"
@@ -131,6 +132,10 @@ class Settings:
         "ecourts_url": os.getenv(
             "ECOURTS_URL",
             "https://ecourts.gov.in/ecourts_home.php"
+        ),
+        "karnataka_hc_url": os.getenv(
+            "KARNATAKA_HC_URL",
+            "https://judiciary.karnataka.gov.in/casemenu.php"
         )
     }
     

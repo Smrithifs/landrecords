@@ -3,16 +3,134 @@ Bhoomi Public Portal Scraper
 No login required - uses public portal at https://landrecords.karnataka.gov.in/Service2/
 """
 
-import asyncio
+import re
 import json
 import os
-import requests
-from playwright.async_api import async_playwright
+import time
+import asyncio
+from datetime import datetime
+from typing import Dict, List, Optional, Any
 from bs4 import BeautifulSoup
-from deep_translator import GoogleTranslator
-import pytesseract
+from selenium import webdriver
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 from PIL import Image
-import io
+import pytesseract
+from rapidfuzz import fuzz, process
+from deep_translator import GoogleTranslator
+from playwright.async_api import async_playwright
+import google.genai as genai
+
+# Bilingual dictionaries for RTC field translation
+RTC_LABELS_KN_EN = {
+    # Header
+    "ಗ್ರಾಮ ನಮೂನೆ ೧": "Village Form No. 1",
+    "ತಾಲ್ಲೂಕು ಮೊಹರು": "Taluk Seal",
+    "ರೆಕಾರ್ಡ್ ಆಫ್ ರೈಟ್ಸ್, ಗೇಣಿ ಮತ್ತು ಪಹಣಿ ಪತ್ರಿಕೆ": "Record of Rights, Tenancy and Crops (R.T.C.) Form No. 1",
+    "ತಾಲ್ಲೂಕು": "Taluk",
+    "ಹೋಬಳಿ": "Hobli",
+    "ಗ್ರಾಮ": "Village",
+    "ಪುಟದ ಕ್ರಮ ಸಂಖ್ಯೆ": "Page Sl. No.",
+    "ಸರ್ವೆ ನಂಬರು": "Survey Number",
+    "ಹಿಸ್ಸಾ": "Hissa (Sub-division)",
+    "ಪೀಸೆವಾರು": "Split-up Details (Pisewaru)",
+    "ಒಟ್ಟು ವಿಸ್ತೀರ್ಣ": "Total Area",
+    "ಪೂಟ್ ಖರಾಬ್ (ಅ)": "Phut Kharab (A)",
+    "ಪೂಟ್ ಖರಾಬ್ (ಬ)": "Phut Kharab (B)",
+    "ಉಳಿದದ್ದು": "Remainder / Net Area",
+    "ಎಕರೆ ಗುಂಟೆ ಆಣೆ": "Acre - Guntas - Aane",
+    "ಕಂದಾಯ": "Land Revenue (Tax)",
+    "ಭೂ ಕಂದಾಯ": "Land Revenue",
+    "ಜೋಡಿ": "Jodi",
+    "ಸೆಸ್ಸುಗಳು": "Cess",
+    "ನೀರಿನ ದರ": "Water Rate",
+    "ರೂ. ಪೈ": "Rs. - Paise",
+    "ಒಟ್ಟು": "Total",
+    "ಮಣ್ಣಿನ ನಮೂನೆ": "Soil Type",
+    "ಪಟ್ಟಾ": "Patta (Land Title Type)",
+    "ಮರಗಳ ಸಂಖ್ಯೆ": "Number of Trees",
+    "ಹೆಸರು": "Name",
+    "ಸಂಖ್ಯೆ": "Number",
+    "ಬೇಸಾಯ ಪ್ರಕಾರ ಸೀರಾವರಿಯ ವಿಸ್ತೀರ್ಣ": "Area under Cultivation Type / Irrigation",
+    "ಕ್ರ. ಸಂ": "Sl. No.",
+    "ಸೀರಾವರಿ ಮೂಲ": "Source of Irrigation",
+    "ಮುಂಗಾರು": "Kharif (Monsoon crop season)",
+    "ಹಿಂಗಾರು": "Rabi (Winter crop season)",
+    "ಬಾಗಾಯ್ತು": "Garden Land (Bagayat)",
+    "ಕಟ್ಟೆ ಅಥವಾ ಸ್ವಾಧೀನದಾರನ ಹೆಸರು": "Name of Occupant/Kattedar",
+    "ತಂದೆಯ ಹೆಸರು ಮತ್ತು ವಿಳಾಸ": "Father's Name and Address",
+    "ವಿಸ್ತೀರ್ಣ ಎ ಗುಂ": "Area (Acre-Guntas)",
+    "ಖಾತೆ ನಂ": "Khata No.",
+    "ಕಟ್ಟೆ ಅಥವಾ ಸ್ವಾಧೀನತೆಯ ರೀತಿ": "Nature of Occupation/Possession",
+    "ಇತರೆ ಹಕ್ಕುಗಳು ಮತ್ತು ಋಣಗಳು": "Other Rights and Liabilities",
+    "ಹಕ್ಕುಗಳು": "Rights",
+    "ಋಣಗಳು": "Liabilities",
+    "ಸಾಗುವಳಿ ವಿವರ": "Cultivation Details",
+    "ವರ್ಷ ಮತ್ತು ಕಾಲ": "Year and Season",
+    "ವ್ಯವಸಾಯಗಾರನ ಹೆಸರು ಮತ್ತು ವಾಸಸ್ಥಳ": "Cultivator's Name and Residence",
+    "ಸಾಗುವಳಿ ಪದ್ಧತಿ": "Method of Cultivation",
+    "ಗೇಣಿಯ ವಿವರ": "Tenancy/Rent Details",
+    "ಗುತ್ತಿಗೆ": "Lease/Contract",
+    "ವರ್ಗ": "Class",
+    "ಭೂಮಿಯ ಉಪಯೋಗ": "Land Use",
+    "ಮಿಶ್ರ, ತರಿ, ಬಾಗಾಯ್ತು": "Mixed, Dry Land, Garden Land",
+    "ಬೆಳೆಯ ಹೆಸರು": "Crop Name",
+    "ಬೆಳೆಯ ಉಪಯೋಗ ಮತ್ತು ಬೆಳೆಗಳ ವಿವರ": "Crop Use and Crop Details",
+    "ಬೆಳೆಯ ವಿಸ್ತೀರ್ಣ": "Crop Area",
+    "ಅಮಿಶ್ರ": "Non-mixed (Sole crop)",
+    "ಮಿಶ್ರ": "Mixed crop",
+    "ನೀರಾವರಿ ಮೂಲ": "Source of Irrigation",
+    "ಎಕರೆಗೆ ಉತ್ಪತ್ತಿ": "Yield per Acre",
+    "ಮಿತ್ರ, ಬೆಳಗಳ ಒಟ್ಟು": "Companion Crop, Total",
+    "ಮಿತ್ರನ ಹೆಸರು": "Name of Companion (co-cultivator)",
+    "ವಿಸ್ತೀರ್ಣ": "Area",
+}
+
+RTC_VALUES_KN_EN = {
+    # Common recurring VALUES (not labels) - dictionary lookup, not translation
+    "ಸ್ವಂತ": "Self",
+    "ಜಂಟಿ": "Joint",
+    "ಮೇಲಿನ ಜಂಟಿ": "Joint (as above)",
+    "ಬಿನ್": "Bin (son of)",
+    "ಲೇಟ್": "Late",
+    "ಲೇ": "Late",
+    "ಹಕ್ಕು ಬಿಡುಗಡೆ": "Right Released",
+    "ಕಪ್ಪು": "Black",
+    "ಹಾಳು": "Fallow/Waste",
+    "ಇನಾಂ": "Inam (land grant)",
+    "ಸರ್ಕಾರಿ": "Government",
+}
+
+
+def translate_label(kn_text: str, threshold: int = 80) -> str | None:
+    """Exact match first, then fuzzy match against known labels."""
+    if kn_text in RTC_LABELS_KN_EN:
+        return RTC_LABELS_KN_EN[kn_text]
+    match, score, _ = process.extractOne(
+        kn_text, RTC_LABELS_KN_EN.keys(), scorer=fuzz.ratio
+    )
+    return RTC_LABELS_KN_EN[match] if score >= threshold else None
+
+
+def translate_value(kn_text: str, threshold: int = 80) -> dict:
+    """
+    Returns {'kn': original, 'en': translated_or_same, 'needs_review': bool}
+    Numbers pass through unchanged. Known values are dictionary-matched.
+    Unmatched text (likely names) is flagged for review, never guessed.
+    """
+    if re.fullmatch(r'[\d.\-/]+', kn_text.strip()):
+        return {"kn": kn_text, "en": kn_text, "needs_review": False}
+    if kn_text in RTC_VALUES_KN_EN:
+        return {"kn": kn_text, "en": RTC_VALUES_KN_EN[kn_text], "needs_review": False}
+    match, score, _ = process.extractOne(
+        kn_text, RTC_VALUES_KN_EN.keys(), scorer=fuzz.ratio
+    )
+    if score >= threshold:
+        return {"kn": kn_text, "en": RTC_VALUES_KN_EN[match], "needs_review": False}
+    return {"kn": kn_text, "en": kn_text, "needs_review": True}
 
 
 class BhoomiPublicScraper:
@@ -20,6 +138,21 @@ class BhoomiPublicScraper:
         self.base_url = "https://landrecords.karnataka.gov.in/Service2/"
         self.rtc_url = "https://landrecords.karnataka.gov.in/Service2/RTC.aspx"
         self.translator = GoogleTranslator(source='kn', target='en')
+        
+        # Configure Gemini API
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+            load_dotenv(".env.example", override=False)
+        except Exception:
+            pass
+        
+        self.gemini_api_key = os.getenv("GEMINI_API_KEY")
+        self.gemini_client = None
+        if self.gemini_api_key:
+            self.gemini_client = genai.Client(api_key=self.gemini_api_key)
+        else:
+            print("Warning: GEMINI_API_KEY environment variable is not set; Gemini extraction will be skipped.")
     
     def translate_text(self, text: str) -> str:
         """Translate Kannada text to English."""
@@ -30,105 +163,314 @@ class BhoomiPublicScraper:
             return translated
         except Exception as e:
             print(f"Translation error for '{text}': {e}")
-            return text  # Return original if translation fails
+            return text
     
-    def _parse_rtc_ocr_text(self, ocr_text: str) -> dict:
-        """Parse OCR text to extract RTC fields."""
-        fields = {}
-        lines = ocr_text.split('\n')
+    def _extract_with_gemini(self, image_paths: list, output_path: str) -> dict:
+        """Extract RTC data using Gemini Vision API from multiple screenshots."""
+        try:
+            if not self.gemini_client or not self.gemini_api_key:
+                print("Gemini extraction skipped: GEMINI_API_KEY is not configured.")
+                return None
+
+            # Load all images
+            images_data = []
+            for img_path in image_paths:
+                if os.path.exists(img_path):
+                    with open(img_path, "rb") as f:
+                        images_data.append(f.read())
+                    print(f"Loaded image: {img_path}")
+                else:
+                    print(f"Image not found: {img_path}")
+            
+            if not images_data:
+                print("No valid images found for Gemini extraction")
+                return None
+            
+            # Comprehensive prompt for RTC extraction from both pages
+            prompt = """
+            Analyze these RTC (Record of Rights, Tenancy and Crops) document screenshots and extract ALL details.
+            
+            You will see TWO images:
+            1. Search/Results Page - showing district, taluk, hobli, village selection, survey number, owner table
+            2. RTC Form Page (Village Form No. 1) - showing detailed land records
+            
+            Extract ALL information from BOTH images and return the result as a JSON object with Kannada and English side by side.
+            
+            Extract these fields with both Kannada and English values:
+            
+            From Search/Results Page:
+            - District, Taluk, Hobli, Village
+            - Survey Number, Surnoc, Hissa No
+            - Period/Validity dates
+            - Land ID
+            - OnGoing Mutation status
+            - PYKI status
+            - Owner Table: Owner names, Extent, Category, Gov Restriction, Court Stay, Alienated
+            
+            From RTC Form Page:
+            - Header: Taluk, Hobli, Village, Valid from date
+            - Survey Number, Hissa
+            - Total Area, Phut Kharab (A), Phut Kharab (B), Remainder
+            - Land Revenue breakdown: Land Revenue (a), Jodi (b), Cess (c), Water Rate (d), Total
+            - Soil Type, Patta
+            - Number of Trees, Irrigation Area
+            - Occupant Name, Area, Khata No, Joint Owner
+            - Nature of Possession
+            - Rights / Liabilities
+            - Cultivation Details: Year, Season, Cultivator names, Method, Areas, Yield
+            
+            IMPORTANT:
+            - Extract ALL text from BOTH images, including Kannada text
+            - Provide both Kannada and English values side by side
+            - For names, provide transliteration to English
+            - For numerical values, keep them as-is
+            - Return ONLY valid JSON, no additional text
+            - If a field is empty or not found, use empty string ""
+            - Combine information from both images into a complete result
+            """
+            
+            # Try different model names
+            model_names = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-2.0-flash"]
+            response = None
+
+            for model_name in model_names:
+                try:
+                    # Build contents with prompt and all images
+                    contents = [prompt]
+                    for img_data in images_data:
+                        contents.append(
+                            genai.types.Part.from_bytes(
+                                data=img_data,
+                                mime_type="image/png"
+                            )
+                        )
+                    
+                    response = self.gemini_client.models.generate_content(
+                        model=model_name,
+                        contents=contents
+                    )
+                    print(f"Gemini extraction successful with model: {model_name}")
+                    break
+                except Exception as e:
+                    print(f"Failed with model {model_name}: {e}")
+                    continue
+            else:
+                raise Exception("All Gemini model attempts failed")
+            
+            # Parse response
+            result_text = response.text
+            
+            # Clean up response (remove markdown code blocks if present)
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0].strip()
+            
+            # Parse JSON
+            result_json = json.loads(result_text)
+            
+            # Save to file
+            with open(output_path, "w", encoding="utf-8") as f:
+                json.dump(result_json, f, indent=2, ensure_ascii=False)
+            
+            print(f"Gemini extraction saved to: {output_path}")
+            return result_json
+            
+        except Exception as e:
+            print(f"Gemini extraction failed: {e}")
+            return None  # Return original if translation fails
+    
+    def _extract_rtc_fields_from_ocr(self, ocr_data: dict, image_width: int, image_height: int, survey_no: str = "") -> dict:
+        """Extract RTC fields from OCR data using dynamic label-relative detection."""
         
-        # Common Kannada field labels in RTC documents
-        field_patterns = {
-            'owner_name': ['ಹೆಸರು', 'ಹೆಸರು', 'Name', 'ಒಡೆತನ', 'ಸ್ವಾಧೀನದಾರನ'],
-            'father_husband': ['ತಂದೆ', 'ಪತಿ', 'Father', 'Husband', 'ಬಿನ್'],
-            'survey_number': ['ಸರ್ವೆ ಸಂಖ್ಯೆ', 'Survey No', 'ಸರ್ವೆ'],
-            'surnoc': ['ಸರ್ ನಾಕ್', 'Surnoc', 'ಸರ್ನಾಕ್'],
-            'hissa': ['ಹಿಸ್ಸಾ', 'Hissa', 'ಹಿಸ್ಸ'],
-            'village': ['ಗ್ರಾಮ', 'Village', 'ಗ್ರಾಮದ'],
-            'hobli': ['ಹೊಬಳಿ', 'Hobli', 'ಹೊಬಳಿಯ'],
-            'taluk': ['ತಾಲ್ಲೂಕು', 'Taluk', 'ತಾಲ್ಲೂಕ'],
-            'district': ['ಜಿಲ್ಲೆ', 'District', 'ಜಿಲ್ಲಾ'],
-            'khata_number': ['ಖತ', 'Khata', 'ಖತಾ'],
-            'land_extent': ['ವಿಸ್ತೀರ್ಣ', 'Extent', 'ವಿಸ್ತೀರ್ಣ', 'ಎಕರೆ'],
-            'land_classification': ['ವರ್ಗ', 'Class', 'ವರ್ಗೀಕರಣ'],
-            'soil_type': ['ಮಣ್ಣು', 'Soil', 'ಮಣ್ಣಿನ'],
-            'rtc_period': ['ಅವಧಿ', 'Period', 'ಅವಧಿಯ'],
+        # Initialize result structure with kn/en side-by-side and needs_review flags
+        result = {
+            "survey_number": {"kn": survey_no, "en": survey_no, "needs_review": False},
+            "hissa": {"kn": "", "en": "", "needs_review": False},
+            "split_up_details": {
+                "total_area": {"kn": "", "en": "", "needs_review": False},
+                "phut_kharab_a": {"kn": "", "en": "", "needs_review": False},
+                "phut_kharab_b": {"kn": "", "en": "", "needs_review": False},
+                "remainder": {"kn": "", "en": "", "needs_review": False}
+            },
+            "land_revenue": {
+                "land_revenue": {"kn": "", "en": "", "needs_review": False},
+                "jodi": {"kn": "", "en": "", "needs_review": False},
+                "cess": {"kn": "", "en": "", "needs_review": False},
+                "water_rate": {"kn": "", "en": "", "needs_review": False},
+                "total": {"kn": "", "en": "", "needs_review": False}
+            },
+            "soil_type": {"kn": "", "en": "", "needs_review": False},
+            "patta": {"kn": "", "en": "", "needs_review": False},
+            "occupant": {
+                "name": {"kn": "", "en": "", "needs_review": False},
+                "area": {"kn": "", "en": "", "needs_review": False},
+                "khata_no": {"kn": "", "en": "", "needs_review": False}
+            },
+            "possession_nature": {"kn": "", "en": "", "needs_review": False},
+            "cultivation_rows": []
         }
         
-        # Extract owner name from specific RTC format
-        # Look for lines with year patterns followed by Kannada names
-        for i, line in enumerate(lines):
-            line = line.strip()
+        # Build list of valid OCR words with their positions
+        words_with_boxes = []
+        for i in range(len(ocr_data['text'])):
+            text = ocr_data['text'][i].strip()
+            conf = ocr_data['conf'][i]
+            if text and conf > 0:  # Only use words with positive confidence
+                words_with_boxes.append({
+                    'text': text,
+                    'left': ocr_data['left'][i],
+                    'top': ocr_data['top'][i],
+                    'width': ocr_data['width'][i],
+                    'height': ocr_data['height'][i],
+                    'conf': conf
+                })
+        
+        print(f"Valid OCR words: {len(words_with_boxes)}")
+        
+        # Dynamic label detection function
+        def find_label_position(label_text, threshold=60):
+            """Find the position of a label using fuzzy matching."""
+            best_match = None
+            best_score = 0
+            for word in words_with_boxes:
+                score = fuzz.ratio(label_text, word['text'])
+                if score > best_score and score >= threshold:
+                    best_score = score
+                    best_match = word
+            return best_match, best_score
+        
+        # Survey number is now taken from input parameter, not extracted from OCR
+        
+        # Extract occupant name from top section (look for "ಸ್ವಾಧೀನದಾರನ ಹೆಸರು" label)
+        occupant_label, _ = find_label_position('ಸ್ವಾಧೀನದಾರನ ಹೆಸರು', threshold=60)
+        if occupant_label:
+            # Look for data below the label on the right side
+            start_y = occupant_label['top'] + 50
+            end_y = start_y + 100
+            occupant_words = []
+            for word in words_with_boxes:
+                x_percent = word['left'] / image_width
+                if (word['top'] > start_y and word['top'] < end_y and x_percent > 0.40):
+                    # Skip single digits and very short words
+                    if len(word['text']) > 2 or not word['text'].isdigit():
+                        occupant_words.append(word)
             
-            # Look for year patterns like "2025-2026" followed by Kannada names
-            if '2025-2026' in line or '2024-2025' in line or '2023-2024' in line:
-                # Extract Kannada text after the year on the same line
-                kannada_part = line.split('2025-2026')[-1].split('2024-2025')[-1].split('2023-2024')[-1].strip()
-                # Remove brackets
-                kannada_part = kannada_part.replace('[', '').replace(']', '').replace(']', '').strip()
-                # Remove trailing crop names
-                for crop in ['ಮು೦ಗಾರು', 'ಹಿಂಗಾರು', 'ಬೇಸಿಗೆ', 'ಉರುಫ್', '|']:
-                    kannada_part = kannada_part.split(crop)[0].strip()
-                
-                # Check if this is a valid owner name (contains Kannada, reasonable length)
-                if kannada_part and len(kannada_part) > 5 and any('\u0C80' <= char <= '\u0CFF' for char in kannada_part):
-                    # Skip if it's a label
-                    if not any(label in kannada_part for label in ['ತಂದೆ', 'ಪತಿ', 'ವಿಳಾಸ', 'ಕಚ್ಚೆ', 'ಸ್ವಾಧೀನತೆ', 'ರೀತಿ']):
-                        fields['owner_name'] = kannada_part
-                        print(f"Found owner name: {kannada_part}")
-                        break
+            if occupant_words:
+                # Sort by confidence and pick the best match
+                occupant_words.sort(key=lambda w: w['conf'], reverse=True)
+                # Join multiple words in the same row to get full name
+                row_text = ' '.join([w['text'] for w in occupant_words[:5]])  # Take top 5 words
+                translation_result = translate_value(row_text)
+                result['occupant']['name'] = {
+                    "kn": translation_result["kn"],
+                    "en": translation_result["en"],
+                    "needs_review": translation_result["needs_review"]
+                }
+                print(f"Extracted occupant name: kn='{translation_result['kn']}' en='{translation_result['en']}' needs_review={translation_result['needs_review']}")
         
-        # If owner name not found with year pattern, try direct extraction
-        if 'owner_name' not in fields:
-            # Look for lines with typical Kannada name patterns
-            for line in lines:
-                line = line.strip()
-                # Skip lines that are clearly headers or labels
-                if any(label in line for label in ['ಗ್ರಾಮ', 'ತಾಲ್ಲೂಕು', 'ಹೋಬಳಿ', 'ವಿಸ್ತೀರ್ಣ', 'ಖೇತವಾರು', 'ಕಂದಾಯ', 'ರೆಕಾರ್ಡ್‌', 'RTC', 'DIGITALLY', 'SIGNED', 'ಮಿಶ್ರಣದ', 'ವಿಸ್ತೀರ್ಣ', 'ಎಕರೆ', 'ನೀರಿನ', 'ಮರಗಳ', 'ನೀರಾವರಿ', 'ವರ್ಷ']):
-                    continue
-                
-                # Look for Kannada text with dots or spaces (typical name patterns)
-                if any('\u0C80' <= char <= '\u0CFF' for char in line):
-                    if '.' in line or ' ' in line:
-                        # Extract Kannada text only
-                        kannada_text = ''.join(char for char in line if '\u0C80' <= char <= '\u0CFF' or char in ' .')
-                        # Remove trailing crop names
-                        for crop in ['ಮು೦ಗಾರು', 'ಹಿಂಗಾರು', 'ಬೇಸಿಗೆ', 'ಉರುಫ್', '|']:
-                            kannada_text = kannada_text.split(crop)[0].strip()
-                        if len(kannada_text) > 5:  # Minimum length for a name
-                            fields['owner_name'] = kannada_text
-                            print(f"Found owner name (direct): {kannada_text}")
-                            break
+        # Extract cultivation rows (look for "ಸಾಗುವಳಿ" label)
+        cultivation_label, _ = find_label_position('ಸಾಗುವಳಿ', threshold=60)
+        if cultivation_label:
+            # Extract all words below the cultivation label
+            cultivation_words = []
+            for word in words_with_boxes:
+                if word['top'] > cultivation_label['top']:
+                    cultivation_words.append(word)
+            
+            # Group by rows
+            cultivation_words.sort(key=lambda w: w['top'])
+            rows = []
+            current_row = []
+            current_y = None
+            y_tolerance = 20
+            
+            for word in cultivation_words:
+                if current_y is None or abs(word['top'] - current_y) > y_tolerance:
+                    if current_row:
+                        rows.append(current_row)
+                    current_row = [word]
+                    current_y = word['top']
+                else:
+                    current_row.append(word)
+            
+            if current_row:
+                rows.append(current_row)
+            
+            # Extract cultivation rows (skip header rows, focus on data rows)
+            for i, row in enumerate(rows[3:6]):  # Skip first 3 header rows, take next 3 data rows
+                row_text = ' '.join([w['text'] for w in row])
+                if row_text and len(row_text) > 5:  # Filter out empty or very short rows
+                    translation_result = translate_value(row_text)
+                    result['cultivation_rows'].append({
+                        "kn": translation_result["kn"],
+                        "en": translation_result["en"],
+                        "needs_review": translation_result["needs_review"]
+                    })
+                    print(f"Extracted cultivation row {i+1}: kn='{translation_result['kn'][:50]}...' en='{translation_result['en'][:50]}...' needs_review={translation_result['needs_review']}")
         
-        # Simple pattern matching - look for field labels and extract following text
-        current_field = None
-        for line in lines:
-            line = line.strip()
-            if not line:
+        return result
+    
+    def _find_nearest_value(self, label_box: dict, words_with_boxes: list) -> str:
+        """Find the nearest value text to the right or below a label."""
+        label_left = label_box['left']
+        label_top = label_box['top']
+        label_right = label_left + label_box['width']
+        label_bottom = label_top + label_box['height']
+        
+        # Words that are likely labels, not values
+        label_words = {'ಎಕರೆ', 'ಗುಂಟೆ', 'ಆಣೆ', 'ರೂ', 'ಪೈ', 'ವಿಸ್ತೀರ್ಣ', 'ಎ', 'ಗುಂ', 'ಖರಾಬ್', 'ಕಂದಾಯ', 'ಜೋಡಿ', 'ಸೆಸ್ಸು', 'ನೀರಿನ', 'ದರ', 'ಒಟ್ಟು', 'ಮಣ್ಣಿನ', 'ನಮೂನೆ', 'ಪಟ್ಟಾ', 'ಹೆಸರು', 'ಸಂಖ್ಯೆ', 'ಕ್ರ', 'ಸಂ', 'ಮೂಲ', 'ಮುಂಗಾರು', 'ಹಿಂಗಾರು', 'ಬಾಗಾಯ್ತು', 'ವಿಳಾಸ', 'ವಿವರ', 'ಪದ್ಧತಿ', 'ಗೇಣಿಯ', 'ಗುತ್ತಿಗೆ', 'ವರ್ಗ', 'ಭೂಮಿಯ', 'ಉಪಯೋಗ', 'ಬೆಳೆಯ', 'ನೀರಾವರಿ', 'ಉತ್ಪತ್ತಿ', 'ಮಿತ್ರ', 'ಬೆಳಗಳ', 'ಒಟ್ಟು', 'ಮಿತ್ರನ', 'ನಮೂದಿಸಿರುವುದಿಲ್ಲ'}
+        
+        # Look for text to the right (same row, slightly to the right)
+        candidates = []
+        for word_box in words_with_boxes:
+            word_left = word_box['left']
+            word_top = word_box['top']
+            word_text = word_box['text']
+            
+            # Skip if this is the same word as the label
+            if word_box == label_box:
                 continue
-            
-            # Check if this line contains a field label
-            for field, patterns in field_patterns.items():
-                for pattern in patterns:
-                    if pattern in line:
-                        current_field = field
-                        # Extract value after the label
-                        value = line.replace(pattern, '').strip()
-                        if value:
-                            fields[field] = value
-                        break
-                if current_field:
-                    break
-            
-            # If no field label found but we have a current field, append to it
-            if not any(pattern in line for patterns in field_patterns.values() for pattern in patterns):
-                if current_field and line:
-                    if current_field in fields:
-                        fields[current_field] += ' ' + line
-                    else:
-                        fields[current_field] = line
+                
+            # Check if word is to the right and on same row (within vertical tolerance)
+            if word_left > label_right and abs(word_top - label_top) < 30:
+                # Check if it's not another label word
+                if word_text not in label_words and not any(lw in word_text for lw in label_words):
+                    distance = word_left - label_right
+                    if distance < 200:  # Within reasonable horizontal distance
+                        candidates.append((distance, word_text))
         
-        return fields
+        # Sort by distance and return the closest
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+        
+        # If nothing to the right, look below
+        candidates = []
+        for word_box in words_with_boxes:
+            word_left = word_box['left']
+            word_top = word_box['top']
+            word_text = word_box['text']
+            
+            # Skip if this is the same word as the label
+            if word_box == label_box:
+                continue
+                
+            # Check if word is below and horizontally aligned
+            if word_top > label_bottom and abs(word_left - label_left) < 100:
+                if word_text not in label_words and not any(lw in word_text for lw in label_words):
+                    distance = word_top - label_bottom
+                    if distance < 100:  # Within reasonable vertical distance
+                        candidates.append((distance, word_text))
+        
+        # Sort by distance and return the closest
+        if candidates:
+            candidates.sort(key=lambda x: x[0])
+            return candidates[0][1]
+        
+        return ""
+    
+    
     
     async def fetch_rtc(self, district: str, taluk: str, hobli: str, village: str, survey_no: str):
         """
@@ -253,6 +595,11 @@ class BhoomiPublicScraper:
                         option_count = await surnoc_locator.evaluate('el => el.options.length')
                         print(f"Surnoc exists: True, disabled: {is_disabled}, options: {option_count}")
                         
+                        # Check for error messages
+                        error_text = await page.locator('text=/error|invalid|not found/i').all_text_contents()
+                        if error_text:
+                            print(f"Error messages found: {error_text}")
+                        
                         # If still disabled, try pressing Enter on survey field using locator
                         if is_disabled or option_count <= 1:
                             print("Surnoc still disabled, trying Enter key on survey field...")
@@ -269,9 +616,22 @@ class BhoomiPublicScraper:
                                 option_count = await surnoc_locator.evaluate('el => el.options.length')
                                 print(f"After Enter - disabled: {is_disabled}, options: {option_count}")
                                 
-                                # If still disabled after Enter, skip Surnoc selection
+                                # If still disabled after Enter, try clicking Go again
                                 if is_disabled or option_count <= 1:
-                                    print("Surnoc still disabled after Enter, skipping Surnoc selection")
+                                    print("Surnoc still disabled after Enter, trying Go button again...")
+                                    go_locator = page.locator('#ctl00_MainContent_btnCGo')
+                                    await go_locator.click()
+                                    await page.wait_for_timeout(3000)
+                                    
+                                    # Check once more
+                                    surnoc_locator = page.locator('#ctl00_MainContent_ddlCSurnocNo')
+                                    is_disabled = await surnoc_locator.evaluate('el => el.disabled')
+                                    option_count = await surnoc_locator.evaluate('el => el.options.length')
+                                    print(f"After second Go - disabled: {is_disabled}, options: {option_count}")
+                                
+                                # If still disabled after second Go, skip Surnoc selection
+                                if is_disabled or option_count <= 1:
+                                    print("Surnoc still disabled after all attempts, skipping Surnoc selection")
                                     print("Proceeding with Fetch Details anyway...")
                     else:
                         print("Surnoc dropdown not found on page")
@@ -325,54 +685,64 @@ class BhoomiPublicScraper:
                         "survey_no": survey_no,
                         "surnoc": "*",
                         "hissa_no": "*",
-                        "owner_name": "",
-                        "extent": "",
-                        "owner_category": "",
-                        "gov_restriction": "",
-                        "court_stay": "",
-                        "period": "",
-                        "year": "",
+                        "OnGoing Mutation": "",
+                        "PYKI": "",
+                        "Owners": [],
                         "raw_html": page_content
                     }
                     
-                    # Try to extract from table
+                    # Extract OnGoing Mutation and PYKI fields
+                    # These are typically displayed as labels above the table
+                    text_content = soup.get_text()
+                    if "OnGoing Mutation" in text_content:
+                        # Extract value after "OnGoing Mutation"
+                        import re
+                        ongoing_match = re.search(r'OnGoing Mutation\s*:\s*(\w+)', text_content)
+                        if ongoing_match:
+                            rtc_data["OnGoing Mutation"] = ongoing_match.group(1)
+                    
+                    if "PYKI" in text_content:
+                        # Extract value after "PYKI"
+                        pyki_match = re.search(r'PYKI\s*:\s*(\w+)', text_content)
+                        if pyki_match:
+                            rtc_data["PYKI"] = pyki_match.group(1)
+                    
+                    # Extract ownership table
                     tables = soup.find_all('table')
                     for table in tables:
                         rows = table.find_all('tr')
-                        # Skip header row, extract data rows
-                        for i, row in enumerate(rows):
-                            cells = row.find_all(['td', 'th'])
-                            if len(cells) >= 2:
-                                # First row is header, skip it
-                                if i == 0:
-                                    continue
-                                
-                                # Extract owner name from first column
-                                owner_name = cells[0].get_text(strip=True)
-                                if owner_name and owner_name not in ['Owner', '']:
-                                    if not rtc_data["owner_name"]:
-                                        rtc_data["owner_name"] = owner_name
-                                    else:
-                                        # Append additional owners
-                                        rtc_data["owner_name"] += f", {owner_name}"
-                                
-                                # Extract extent from second column
-                                if len(cells) >= 2:
-                                    extent = cells[1].get_text(strip=True)
-                                    if extent and extent not in ['Extent', '']:
-                                        if not rtc_data["extent"]:
-                                            rtc_data["extent"] = extent
-                                        else:
-                                            rtc_data["extent"] += f", {extent}"
-                                
-                                # Extract category from third column
-                                if len(cells) >= 3:
-                                    category = cells[2].get_text(strip=True)
-                                    if category and category not in ['Owner Category', '']:
-                                        if not rtc_data["owner_category"]:
-                                            rtc_data["owner_category"] = category
-                                        else:
-                                            rtc_data["owner_category"] += f", {category}"
+                        if len(rows) < 2:
+                            continue
+                        
+                        # Check if this is the ownership table by looking for column headers
+                        header_cells = rows[0].find_all(['td', 'th'])
+                        header_text = ' '.join([cell.get_text(strip=True) for cell in header_cells])
+                        
+                        # Check if this table has the expected columns
+                        if any(keyword in header_text for keyword in ['Owner', 'Extent', 'Category', 'Restriction', 'Court', 'Alienated']):
+                            print(f"Found ownership table with headers: {header_text}")
+                            
+                            # Extract data rows (skip header)
+                            for i, row in enumerate(rows[1:], start=1):
+                                cells = row.find_all(['td', 'th'])
+                                if len(cells) >= 6:  # Expecting 6 columns
+                                    owner_data = {
+                                        "Owner": cells[0].get_text(strip=True),
+                                        "Extent": cells[1].get_text(strip=True),
+                                        "Owner Category": cells[2].get_text(strip=True),
+                                        "Gov Restriction": cells[3].get_text(strip=True),
+                                        "Court stay": cells[4].get_text(strip=True),
+                                        "Alienated": cells[5].get_text(strip=True)
+                                    }
+                                    
+                                    # Only add if it has meaningful data
+                                    if owner_data["Owner"] and owner_data["Owner"] not in ['', 'Owner']:
+                                        rtc_data["Owners"].append(owner_data)
+                                        print(f"Extracted owner: {owner_data}")
+                    
+                    print(f"Total owners extracted: {len(rtc_data['Owners'])}")
+                    print(f"OnGoing Mutation: {rtc_data['OnGoing Mutation']}")
+                    print(f"PYKI: {rtc_data['PYKI']}")
                     
                     # Click View button for full RTC
                     print("Waiting for View button to be visible and enabled...")
@@ -418,7 +788,7 @@ class BhoomiPublicScraper:
                         f.write(full_rtc_html)
                     print(f"HTML saved: {log_dir}/full_rtc_document.html")
                     
-                    # Extract RTC image URL from HTML
+                    # Extract RTC image URL from HTML using BeautifulSoup
                     soup = BeautifulSoup(full_rtc_html, 'html.parser')
                     rtc_image = soup.find('img', id='ImgSketchPage')
                     if rtc_image and rtc_image.get('src'):
@@ -434,82 +804,163 @@ class BhoomiPublicScraper:
                             response = requests.get(rtc_image_url)
                             if response.status_code == 200:
                                 image = Image.open(io.BytesIO(response.content))
-                                image_path = f'{log_dir}/rtc_image.png'
+                                image_path = f'{log_dir}/rtc_page.png'
                                 image.save(image_path)
                                 print(f"RTC image saved: {image_path}")
                                 
-                                # Try OCR if Tesseract is available, otherwise use existing OCR file
+                                # Run OCR with word-level bounding boxes
+                                print("Running OCR with word-level bounding boxes...")
                                 try:
-                                    print("Attempting OCR on RTC image...")
-                                    ocr_text = pytesseract.image_to_string(image, lang='kan')
-                                    print(f"OCR extracted text length: {len(ocr_text)} characters")
+                                    ocr_data = pytesseract.image_to_data(image, lang='kan', output_type=Output.DICT)
                                     
-                                    # Save OCR text
-                                    with open(f"{log_dir}/rtc_ocr_text.txt", "w", encoding="utf-8") as f:
-                                        f.write(ocr_text)
-                                    print(f"OCR text saved: {log_dir}/rtc_ocr_text.txt")
+                                    # Calculate statistics
+                                    num_words = len(ocr_data['text'])
+                                    confidences = [conf for conf in ocr_data['conf'] if conf > 0]
+                                    avg_conf = sum(confidences) / len(confidences) if confidences else 0
+                                    
+                                    print(f"OCR detected {num_words} words")
+                                    print(f"Average confidence: {avg_conf:.2f}")
+                                    
+                                    # Save raw OCR boxes to JSON for inspection
+                                    with open(f"{log_dir}/rtc_ocr_boxes.json", "w", encoding="utf-8") as f:
+                                        json.dump(ocr_data, f, indent=2, ensure_ascii=False)
+                                    print(f"OCR boxes saved to: {log_dir}/rtc_ocr_boxes.json")
+                                    
+                                    # Extract fields using bilingual glossary and bounding boxes
+                                    rtc_document = self._extract_rtc_fields_from_ocr(ocr_data, image.width, image.height, survey_no=survey_no)
+                                    print(f"Extracted RTC document fields: {list(rtc_document.keys())}")
+                                    
+                                    # Log unmatched fields for debugging
+                                    unmatched_fields = []
+                                    for field, value in rtc_document.items():
+                                        if isinstance(value, dict):
+                                            if not any(v.get('kn', '') for v in value.values() if isinstance(v, dict)):
+                                                unmatched_fields.append(field)
+                                        elif isinstance(value, str) and not value:
+                                            unmatched_fields.append(field)
+                                    if unmatched_fields:
+                                        print(f"Fields with no OCR match: {unmatched_fields}")
+                                    
+                                    rtc_data['rtc_document'] = rtc_document
+                                    
                                 except Exception as ocr_error:
                                     print(f"OCR failed: {ocr_error}")
-                                    print("Using existing OCR file if available...")
-                                    ocr_text = ""
-                                    if os.path.exists(f"{log_dir}/rtc_ocr.txt"):
-                                        with open(f"{log_dir}/rtc_ocr.txt", "r", encoding="utf-8") as f:
-                                            ocr_text = f.read()
-                                        print(f"Using existing OCR text from {log_dir}/rtc_ocr.txt")
-                                    elif os.path.exists(f"{log_dir}/rtc_ocr_text.txt"):
-                                        with open(f"{log_dir}/rtc_ocr_text.txt", "r", encoding="utf-8") as f:
-                                            ocr_text = f.read()
-                                        print(f"Using existing OCR text from {log_dir}/rtc_ocr_text.txt")
-                                
-                                if ocr_text:
-                                    # Parse OCR text to extract RTC fields
-                                    rtc_fields = self._parse_rtc_ocr_text(ocr_text)
-                                    print(f"Parsed RTC fields: {list(rtc_fields.keys())}")
-                                    
-                                    # Translate Kannada fields to English
-                                    # Only add OCR fields if not already extracted from HTML table
-                                    for field, kannada_value in rtc_fields.items():
-                                        if kannada_value and kannada_value.strip():
-                                            # Don't overwrite fields already extracted from HTML table
-                                            if field not in rtc_data or not rtc_data[field]:
-                                                english_value = self.translate_text(kannada_value)
-                                                rtc_data[f"{field}_kn"] = kannada_value
-                                                rtc_data[f"{field}_en"] = english_value
-                                                print(f"{field}: KN='{kannada_value}' -> EN='{english_value}'")
-                                            else:
-                                                print(f"Skipping OCR field '{field}' - already extracted from HTML table")
+                                    # Initialize empty rtc_document structure even if OCR fails
+                                    rtc_data['rtc_document'] = {
+                                        "survey_number": {"kn": survey_no, "en": survey_no, "needs_review": False},
+                                        "hissa": {"kn": "", "en": "", "needs_review": False},
+                                        "split_up_details": {
+                                            "total_area": {"kn": "", "en": "", "needs_review": False},
+                                            "phut_kharab_a": {"kn": "", "en": "", "needs_review": False},
+                                            "phut_kharab_b": {"kn": "", "en": "", "needs_review": False},
+                                            "remainder": {"kn": "", "en": "", "needs_review": False}
+                                        },
+                                        "land_revenue": {
+                                            "land_revenue": {"kn": "", "en": "", "needs_review": False},
+                                            "jodi": {"kn": "", "en": "", "needs_review": False},
+                                            "cess": {"kn": "", "en": "", "needs_review": False},
+                                            "water_rate": {"kn": "", "en": "", "needs_review": False},
+                                            "total": {"kn": "", "en": "", "needs_review": False}
+                                        },
+                                        "soil_type": {"kn": "", "en": "", "needs_review": False},
+                                        "patta": {"kn": "", "en": "", "needs_review": False},
+                                        "occupant": {
+                                            "name": {"kn": "", "en": "", "needs_review": False},
+                                            "area": {"kn": "", "en": "", "needs_review": False},
+                                            "khata_no": {"kn": "", "en": "", "needs_review": False}
+                                        },
+                                        "possession_nature": {"kn": "", "en": "", "needs_review": False},
+                                        "cultivation_rows": []
+                                    }
                         except Exception as e:
                             print(f"Error during image processing: {e}")
+                            # Initialize empty rtc_document structure even if download fails
+                            rtc_data['rtc_document'] = {
+                                "survey_number": {"kn": survey_no, "en": survey_no, "needs_review": False},
+                                "hissa": {"kn": "", "en": "", "needs_review": False},
+                                "split_up_details": {
+                                    "total_area": {"kn": "", "en": "", "needs_review": False},
+                                    "phut_kharab_a": {"kn": "", "en": "", "needs_review": False},
+                                    "phut_kharab_b": {"kn": "", "en": "", "needs_review": False},
+                                    "remainder": {"kn": "", "en": "", "needs_review": False}
+                                },
+                                "land_revenue": {
+                                    "land_revenue": {"kn": "", "en": "", "needs_review": False},
+                                    "jodi": {"kn": "", "en": "", "needs_review": False},
+                                    "cess": {"kn": "", "en": "", "needs_review": False},
+                                    "water_rate": {"kn": "", "en": "", "needs_review": False},
+                                    "total": {"kn": "", "en": "", "needs_review": False}
+                                },
+                                "soil_type": {"kn": "", "en": "", "needs_review": False},
+                                "patta": {"kn": "", "en": "", "needs_review": False},
+                                "occupant": {
+                                    "name": {"kn": "", "en": "", "needs_review": False},
+                                    "area": {"kn": "", "en": "", "needs_review": False},
+                                    "khata_no": {"kn": "", "en": "", "needs_review": False}
+                                },
+                                "possession_nature": {"kn": "", "en": "", "needs_review": False},
+                                "cultivation_rows": []
+                            }
                     else:
                         print("No RTC image found in HTML")
+                        # Initialize empty rtc_document structure if no image found
+                        rtc_data['rtc_document'] = {
+                            "survey_number": {"kn": survey_no, "en": survey_no, "needs_review": False},
+                            "hissa": {"kn": "", "en": "", "needs_review": False},
+                            "split_up_details": {
+                                "total_area": {"kn": "", "en": "", "needs_review": False},
+                                "phut_kharab_a": {"kn": "", "en": "", "needs_review": False},
+                                "phut_kharab_b": {"kn": "", "en": "", "needs_review": False},
+                                "remainder": {"kn": "", "en": "", "needs_review": False}
+                            },
+                            "land_revenue": {
+                                "land_revenue": {"kn": "", "en": "", "needs_review": False},
+                                "jodi": {"kn": "", "en": "", "needs_review": False},
+                                "cess": {"kn": "", "en": "", "needs_review": False},
+                                "water_rate": {"kn": "", "en": "", "needs_review": False},
+                                "total": {"kn": "", "en": "", "needs_review": False}
+                            },
+                            "soil_type": {"kn": "", "en": "", "needs_review": False},
+                            "patta": {"kn": "", "en": "", "needs_review": False},
+                            "occupant": {
+                                "name": {"kn": "", "en": "", "needs_review": False},
+                                "area": {"kn": "", "en": "", "needs_review": False},
+                                "khata_no": {"kn": "", "en": "", "needs_review": False}
+                            },
+                            "possession_nature": {"kn": "", "en": "", "needs_review": False},
+                            "cultivation_rows": []
+                        }
+                    
+                    # Run Gemini extraction for comprehensive field data using both screenshots (always run, outside image processing block)
+                    print("Running Gemini extraction for comprehensive field data...")
+                    gemini_output_path = f"{log_dir}/gemini_extraction.json"
+                    
+                    # Use both search page screenshot and RTC form screenshot
+                    search_page_screenshot = f"{log_dir}/bhoomi_public_after_fetch.png"
+                    rtc_form_screenshot = f"{log_dir}/full_rtc_document.png"
+                    
+                    gemini_images = []
+                    if os.path.exists(search_page_screenshot):
+                        gemini_images.append(search_page_screenshot)
+                    if os.path.exists(rtc_form_screenshot):
+                        gemini_images.append(rtc_form_screenshot)
+                    
+                    if gemini_images:
+                        gemini_data = self._extract_with_gemini(gemini_images, gemini_output_path)
+                        if gemini_data:
+                            rtc_data['gemini_extraction'] = gemini_data
+                            print("Gemini extraction completed and added to results")
+                    else:
+                        print("No screenshots found for Gemini extraction")
                     
                     # Store in rtc_data
                     rtc_data["full_rtc_html"] = full_rtc_html
                     
-                    # Save to JSON
+                    # Save to JSON (single output file only)
                     os.makedirs(log_dir, exist_ok=True)
                     with open(f"{log_dir}/bhoomi_public_result.json", "w", encoding="utf-8") as f:
                         json.dump(rtc_data, f, indent=2, ensure_ascii=False)
                     print(f"Results saved to {log_dir}/bhoomi_public_result.json")
-                    
-                    # Save English-only data to separate JSON
-                    english_data = {k: v for k, v in rtc_data.items() if k.endswith('_en') or not k.endswith('_kn')}
-                    with open(f"{log_dir}/bhoomi_public_result_english.json", "w", encoding="utf-8") as f:
-                        json.dump(english_data, f, indent=2, ensure_ascii=False)
-                    print(f"English results saved to {log_dir}/bhoomi_public_result_english.json")
-                    
-                    # Save to CSV for easy viewing
-                    import csv
-                    csv_data = []
-                    for key, value in rtc_data.items():
-                        if isinstance(value, str) and len(value) < 1000:  # Skip long HTML
-                            csv_data.append([key, value])
-                    
-                    with open(f"{log_dir}/bhoomi_public_result.csv", "w", encoding="utf-8", newline='') as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["Field", "Value"])
-                        writer.writerows(csv_data)
-                    print(f"CSV results saved to {log_dir}/bhoomi_public_result.csv")
                     
                     print("\n=== EXTRACTED DATA ===")
                     print(json.dumps(rtc_data, indent=2, ensure_ascii=False))

@@ -11,7 +11,7 @@ async def test_public_mutation_scraper():
         print("Taluk: BANGALORE-NORTH")
         print("Hobli: DASANAPURA1")
         print("Village: ADAKAMARANAHALLI")
-        print("Survey Number: 1")
+        print("Survey Number: 3")
         print()
         
         result = await scraper.fetch_mutation(
@@ -19,7 +19,10 @@ async def test_public_mutation_scraper():
             taluk='BANGALORE-NORTH',
             hobli='DASANAPURA1',
             village='ADAKAMARANAHALLI',
-            survey_no='1'
+            survey_no='3',
+            max_mutations=None,  # Process all mutations
+            headless=False,
+            extract_details=False  # Only get status/summary, not detailed previews
         )
         
         print("\n=== MUTATION DATA ===")
