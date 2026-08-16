@@ -576,71 +576,66 @@ class EswathuEkathaScraper:
             print(f"   nav failed: {e}")
             return False, None
 
-        print("   Page loaded. Switching to English...")
-        try:
-            en_btn = await self._ensure_selector(page, self.SEL_LANG_EN, retries=4, delay_ms=1200)
-            if en_btn:
-                try:
-                    await en_btn.click()
-                    await self._wait_postback(page)
-                    print("   [language] English mode enabled")
-                except Exception as ce:
-                    print(f"   [language] click failed (may already be English): {ce}")
-            else:
-                print("   [language] English button not found (proceeding anyway)")
-        except Exception as e:
-            print(f"   [language] error: {e}")
+        # English language switch is removed per user request: "no need english"
+        # print("   Page loaded. Switching to English...")
+        # try:
+        #     en_btn = await self._ensure_selector(page, self.SEL_LANG_EN, retries=4, delay_ms=1200)
+        #     if en_btn:
+        #         await en_btn.click()
+        #         await self._wait_postback(page)
+        #         print("   [language] English mode enabled")
+        # except Exception:
+        #     pass
 
         print("   Filling form dropdowns...")
 
-        try:
-            el = await self._ensure_selector(page, self.SEL_DISTRICT)
-            if el:
-                await el.select_option(label=search_ctx["district"])
-                print(f"   [district] selected {search_ctx['district']}")
-                await self._wait_postback(page)
-            else:
-                print("   [district] ⚠️ NOT FOUND")
-        except Exception as e:
-            print(f"   [district] error: {e}")
+        async def _select_robust(selector: str, label_en: str, field_name: str):
+            try:
+                el = await self._ensure_selector(page, selector)
+                if el:
+                    found = False
+                    # Try exact label first (works if UI is English or label is English)
+                    try:
+                        await el.select_option(label=label_en)
+                        print(f"   [{field_name}] selected {label_en}")
+                        found = True
+                    except Exception:
+                        # Try to find option that contains the English text (transliteration check)
+                        # or just select the second option if only one real option exists
+                        options = await el.evaluate('el => Array.from(el.options).map(o => ({text: o.text, value: o.value}))')
+                        for opt in options:
+                            if opt['text'] and label_en.lower() in opt['text'].lower():
+                                await el.select_option(value=opt['value'])
+                                print(f"   [{field_name}] selected by partial match: {opt['text']}")
+                                found = True
+                                break
+                        
+                        if not found and len(options) > 1:
+                            # Fallback: select the first non-default option if we can't match
+                            await el.select_option(index=1)
+                            print(f"   [{field_name}] fallback to first option: {options[1]['text']}")
+                            found = True
+                    
+                    if found:
+                        await self._wait_postback(page)
+                else:
+                    print(f"   [{field_name}] ⚠️ NOT FOUND")
+            except Exception as e:
+                print(f"   [{field_name}] error: {e}")
 
-        try:
-            el = await self._ensure_selector(page, self.SEL_TALUK)
-            if el:
-                await el.select_option(label=search_ctx["taluk"])
-                print(f"   [taluk] selected {search_ctx['taluk']}")
-                await self._wait_postback(page)
-            else:
-                print("   [taluk] ⚠️ NOT FOUND")
-        except Exception as e:
-            print(f"   [taluk] error: {e}")
-
-        try:
-            el = await self._ensure_selector(page, self.SEL_PANCHAYATH)
-            if el:
-                await el.select_option(label=search_ctx["panchayath"])
-                print(f"   [panchayath] selected {search_ctx['panchayath']}")
-                await self._wait_postback(page)
-            else:
-                print("   [panchayath] ⚠️ NOT FOUND")
-        except Exception as e:
-            print(f"   [panchayath] error: {e}")
-
-        try:
-            el = await self._ensure_selector(page, self.SEL_VILLAGE)
-            if el:
-                await el.select_option(label=search_ctx["village"])
-                print(f"   [village] selected {search_ctx['village']}")
-                await self._wait_postback(page)
-            else:
-                print("   [village] ⚠️ NOT FOUND")
-        except Exception as e:
-            print(f"   [village] error: {e}")
+        await _select_robust(self.SEL_DISTRICT, search_ctx["district"], "district")
+        await _select_robust(self.SEL_TALUK, search_ctx["taluk"], "taluk")
+        await _select_robust(self.SEL_PANCHAYATH, search_ctx["panchayath"], "panchayath")
+        await _select_robust(self.SEL_VILLAGE, search_ctx["village"], "village")
 
         try:
             el = await self._ensure_selector(page, self.SEL_SEARCH_TYPE)
             if el:
-                await el.select_option(label="Owner's Name")
+                # Try English and Kannada for "Owner's Name"
+                try:
+                    await el.select_option(label="Owner's Name")
+                except Exception:
+                    await el.select_option(index=2) # Usually the 2nd or 3rd option
                 print(f"   [search-type] selected Owner's Name")
                 await self._wait_postback(page)
             else:
@@ -791,21 +786,19 @@ class EswathuEkathaScraper:
                 for owner in owners:
                     if stop_early:
                         break
+                    # ONLY use Kannada tokens for search attempts
                     attempts: List[str] = []
                     kn_tokens = self._kannada_tokens(owner.get("raw", ""))
                     if kn_tokens:
+                        # Primary name (first token)
                         attempts.append(kn_tokens[0])
+                        # Combined tokens (first 3)
                         if len(kn_tokens) >= 2:
                             joined = " ".join(kn_tokens[:3])
                             if joined not in attempts:
                                 attempts.append(joined)
-                    if owner.get("search_name"):
-                        if owner["search_name"] not in attempts:
-                            attempts.append(owner["search_name"])
-                    if use_aliases and owner.get("aliases"):
-                        for alias in owner["aliases"]:
-                            if alias and alias not in attempts:
-                                attempts.append(alias)
+                    
+                    # English search names and aliases are removed per user request: "searching in kannada is enough no need english"
 
                     for alias in attempts:
                         if max_searches is not None and len(summary["searches"]) >= max_searches:

@@ -70,8 +70,9 @@ async def main():
             hobli=args.hobli,
             village=args.village,
             survey_no=args.survey,
-            max_mutations=args.limit,
+            max_mutations=None,
             headless=args.headless,
+            extract_details=True,
         )
         print()
         print("=" * 60)

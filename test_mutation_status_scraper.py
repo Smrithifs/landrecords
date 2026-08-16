@@ -13,7 +13,7 @@ async def test_mutation_status_scraper():
         print("Village: ADAKAMARANAHALLI")
         print("Survey Number: 3")
         print()
-        
+
         result = await scraper.fetch_mutation_status(
             district='BENGALURU',
             taluk='BANGALORE-NORTH',

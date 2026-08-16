@@ -472,7 +472,7 @@ class BhoomiPublicScraper:
     
     
     
-    async def fetch_rtc(self, district: str, taluk: str, hobli: str, village: str, survey_no: str):
+    async def fetch_rtc(self, district: str, taluk: str, hobli: str, village: str, survey_no: str, surnoc: str = '*', hissa_no: str = '*'):
         """
         Fetch RTC data from public Bhoomi portal.
         
@@ -481,7 +481,9 @@ class BhoomiPublicScraper:
             taluk: Taluk name (e.g., "BANGALORE-NORTH")
             hobli: Hobli name (e.g., "DASANAPURA1")
             village: Village name (e.g., "ADAKAMARANAHALLI")
-            survey_no: Survey number (e.g., "2")
+            survey_no: Survey number (e.g., "3")
+            surnoc: Surnoc number (default: "*")
+            hissa_no: Hissa number (default: "*")
         
         Returns:
             dict: Extracted RTC data
@@ -636,27 +638,35 @@ class BhoomiPublicScraper:
                     else:
                         print("Surnoc dropdown not found on page")
                     
-                    # Select Surnoc * using fresh locator after postback - only if enabled
-                    print("Selecting Surnoc *")
+                    # Select Surnoc using fresh locator after postback - only if enabled
+                    print(f"Selecting Surnoc {surnoc}")
                     surnoc_locator = page.locator('#ctl00_MainContent_ddlCSurnocNo')
                     if await surnoc_locator.count() > 0:
                         is_disabled = await surnoc_locator.evaluate('el => el.disabled')
                         if not is_disabled:
-                            await surnoc_locator.select_option(value='*')
+                            # Try selecting by value first, then label if value fails
+                            try:
+                                await surnoc_locator.select_option(value=surnoc)
+                            except:
+                                await surnoc_locator.select_option(label=surnoc)
                             await page.wait_for_timeout(2000)
-                            print("Surnoc * selected")
+                            print(f"Surnoc {surnoc} selected")
                         else:
                             print("Surnoc dropdown is disabled, skipping selection")
                     
-                    # Select Hissa * using locator - only if enabled
-                    print("Selecting Hissa *")
+                    # Select Hissa using locator - only if enabled
+                    print(f"Selecting Hissa {hissa_no}")
                     hissa_locator = page.locator('#ctl00_MainContent_ddlCHissaNo')
                     if await hissa_locator.count() > 0:
                         is_disabled = await hissa_locator.evaluate('el => el.disabled')
                         if not is_disabled:
-                            await hissa_locator.select_option(value='*')
+                            # Try selecting by value first, then label if value fails
+                            try:
+                                await hissa_locator.select_option(value=hissa_no)
+                            except:
+                                await hissa_locator.select_option(label=hissa_no)
                             await page.wait_for_timeout(2000)
-                            print("Hissa * selected")
+                            print(f"Hissa {hissa_no} selected")
                         else:
                             print("Hissa dropdown is disabled, skipping selection")
                     
@@ -683,8 +693,8 @@ class BhoomiPublicScraper:
                         "hobli": hobli,
                         "village": village,
                         "survey_no": survey_no,
-                        "surnoc": "*",
-                        "hissa_no": "*",
+                        "surnoc": surnoc,
+                        "hissa_no": hissa_no,
                         "OnGoing Mutation": "",
                         "PYKI": "",
                         "Owners": [],
@@ -744,37 +754,66 @@ class BhoomiPublicScraper:
                     print(f"OnGoing Mutation: {rtc_data['OnGoing Mutation']}")
                     print(f"PYKI: {rtc_data['PYKI']}")
                     
-                    # Click View button for full RTC
-                    print("Waiting for View button to be visible and enabled...")
-                    view_locator = page.locator('#ctl00_MainContent_btnCPreview')
-                    await view_locator.wait_for(state='visible', timeout=10000)
-                    print("View button found")
+                    # Click View/Preview button for full RTC
+                    print("Waiting for View/Preview button to be visible and enabled...")
                     
-                    # Check if button is enabled
-                    is_disabled = await view_locator.get_attribute('disabled')
-                    if is_disabled:
-                        print(f"View button is disabled: {is_disabled}")
+                    # Robust selector list for View/Preview button
+                    view_selectors = [
+                        '#ctl00_MainContent_btnCPreview',
+                        'input[value*="View"]',
+                        'input[value*="Preview"]',
+                        'button:has-text("View")',
+                        'button:has-text("Preview")',
+                        'a:has-text("View")',
+                        'a:has-text("Preview")',
+                        'text=View',
+                        'text=Preview'
+                    ]
+                    
+                    view_locator = None
+                    for selector in view_selectors:
+                        try:
+                            locator = page.locator(selector)
+                            if await locator.count() > 0 and await locator.is_visible():
+                                view_locator = locator
+                                print(f"Found View/Preview button with selector: {selector}")
+                                break
+                        except Exception:
+                            continue
+                            
+                    if not view_locator:
+                        print("View/Preview button not found with standard selectors, trying generic input[type=submit] in the results area...")
+                        view_locator = page.locator('input[type="submit"]:has-text("View"), input[type="submit"]:has-text("Preview")')
+                    
+                    if await view_locator.count() > 0:
+                        # Check if button is enabled
+                        is_disabled = await view_locator.get_attribute('disabled')
+                        if is_disabled:
+                            print(f"View button is disabled: {is_disabled}")
+                        else:
+                            print("View button is enabled")
+                        
+                        print("Clicking View button...")
+                        
+                        # Detect navigation type and handle accordingly
+                        try:
+                            async with context.expect_page(timeout=15000) as popup_info:
+                                await view_locator.click()
+                            
+                            page = await popup_info.value
+                            print("Popup detected - switching to new page")
+                            await page.wait_for_load_state("networkidle")
+                            await page.wait_for_timeout(3000)
+                        except Exception as e:
+                            print(f"No popup detected or error: {e}")
+                            print("Checking for same-page navigation...")
+                            await page.wait_for_load_state("networkidle", timeout=10000)
+                            print("Stayed on same page or navigation complete")
                     else:
-                        print("View button is enabled")
-                    
-                    print("Clicking View button...")
-                    
-                    # Detect navigation type and handle accordingly
-                    async with context.expect_page() as popup_info:
-                        await view_locator.click()
-                    
-                    try:
-                        # Check if a popup/new tab opened
-                        popup = await popup_info.value
-                        print("Popup detected - switching to new page")
-                        page = popup
-                        await page.wait_for_load_state("networkidle")
-                        await page.wait_for_timeout(3000)
-                    except:
-                        # No popup, check for navigation
-                        print("No popup detected - checking for navigation...")
-                        await page.wait_for_load_state("networkidle", timeout=10000)
-                        print("Navigation detected - stayed on same page with navigation")
+                        print("View/Preview button NOT FOUND. Cannot proceed to full RTC.")
+                        # Save screenshot for debugging
+                        await page.screenshot(path=f'{log_dir}/view_button_missing.png')
+                        raise Exception("View/Preview button not found on page")
                     
                     print("RTC document loaded")
                     
